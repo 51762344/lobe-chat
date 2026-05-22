@@ -343,7 +343,50 @@ export default {
   'newAgent': 'Create Agent',
   'newClaudeCodeAgent': 'Add Claude Code',
   'newCodexAgent': 'Add Codex',
+  'newPlatformAgent': 'Add Platform Agent',
   'newGroupChat': 'Create Group',
+
+  // Platform agent: per-platform descriptions shown in step 0 of the creation modal
+  'platformAgent.create.desc.openclaw': 'Run OpenClaw agents on your local machine',
+  'platformAgent.create.desc.hermes': 'Run Hermes agents on your local machine',
+
+  // Platform agent: shared device status label (used in Select option labels)
+  'platformAgent.device.online': 'Online',
+
+  // Platform agent creation modal (openclaw / hermes)
+  'platformAgent.create.title': 'Add Platform Agent',
+  'platformAgent.create.step1': 'Select Platform',
+  'platformAgent.create.step2': 'Select Device',
+  'platformAgent.create.step3': 'Configure Agent',
+  'platformAgent.create.next': 'Next',
+  'platformAgent.create.back': 'Back',
+  'platformAgent.create.create': 'Create Agent',
+  'platformAgent.create.creating': 'Creating...',
+  'platformAgent.create.namePlaceholder': 'e.g. My OpenClaw Agent',
+  'platformAgent.create.descriptionPlaceholder': 'Brief description (optional)',
+  'platformAgent.create.fetchingProfile': 'Fetching profile...',
+  'platformAgent.create.noDevices': 'No devices connected',
+  'platformAgent.create.noDevicesHint': 'Run `lh connect` on the target machine first',
+  'platformAgent.create.refresh': 'Refresh',
+  'platformAgent.create.selectDevice': 'Select a device',
+  'platformAgent.create.checking': 'Checking availability...',
+  'platformAgent.create.available': 'Available',
+  'platformAgent.create.notInstalled': '{{name}} not installed on this device',
+  'platformAgent.create.checkFailed': 'Check failed',
+  'platformAgent.create.comingSoon': 'Coming Soon',
+
+  // Platform agent device guard banner
+  'platformAgent.deviceGuard.deviceOffline.title': 'Device not connected',
+  'platformAgent.deviceGuard.deviceOffline.desc':
+    'The bound device is not connected. Run `lh connect` on that machine then refresh.',
+  'platformAgent.deviceGuard.platformUnavailable.title': '{{name}} not available',
+  'platformAgent.deviceGuard.platformUnavailable.desc':
+    '{{name}} is not installed on the connected device.',
+  'platformAgent.deviceGuard.noDevice.title': 'No device bound',
+  'platformAgent.deviceGuard.noDevice.desc':
+    'This agent has no bound device. Edit the agent profile to configure one.',
+  'platformAgent.deviceGuard.refresh': 'Refresh',
+  'platformAgent.deviceGuard.configure': 'Configure',
   'newPage': 'Create Page',
   'noAgentsYet': 'This group has no members yet. Click the + button to invite agents.',
   'noAvailableAgents': 'No members available to invite',
@@ -658,6 +701,10 @@ export default {
   'taskDetail.runTask': 'Run',
   'taskDetail.stopTask': 'Stop task',
   'taskDetail.navigation': 'Navigation',
+  'taskDetail.notFound.backToTasks': 'Back to all tasks',
+  'taskDetail.notFound.desc':
+    "This task may have been deleted, or you don't have permission to view it.",
+  'taskDetail.notFound.title': 'Task not found',
   'taskDetail.subIssueOf': 'Sub-issue of',
   'taskDetail.priority.high': 'High',
   'taskDetail.priority.low': 'Low',
@@ -956,8 +1003,8 @@ export default {
   'workingPanel.resources.empty':
     'No documents yet. Documents associated with this agent will show up here.',
   'workingPanel.resources.error': 'Failed to load resources',
-  'workingPanel.resources.filter.all': 'All',
   'workingPanel.resources.filter.documents': 'Documents',
+  'workingPanel.resources.filter.skills': 'Skills',
   'workingPanel.resources.filter.web': 'Web',
   'workingPanel.resources.loading': 'Loading resources...',
   'workingPanel.resources.previewError': 'Failed to load preview',
@@ -986,6 +1033,9 @@ export default {
   'workingPanel.localFile.preview.render': 'Preview',
   'workingPanel.localFile.truncated': 'File preview truncated to {{limit}} characters',
   'workingPanel.skills.empty': 'No skills found in this project',
+  'workingPanel.skills.emptyAgent': 'No skills attached to this agent',
+  'workingPanel.skills.section.agent': 'Agent skills',
+  'workingPanel.skills.section.project': 'Project skills',
   'workingPanel.skills.title': 'Skills',
   'workingPanel.files.count_one': '{{count}} file',
   'workingPanel.files.count_other': '{{count}} files',
