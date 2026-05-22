@@ -77,6 +77,7 @@ import {
 import { DocumentService } from '@/server/services/document';
 import { FileService } from '@/server/services/file';
 import { HeterogeneousAgentService } from '@/server/services/heterogeneousAgent';
+import type { ConversationHistoryEntry } from '@/server/services/heterogeneousAgent/cloudHeteroContext';
 import { KlavisService } from '@/server/services/klavis';
 import { MarketService } from '@/server/services/market';
 import { deviceProxy } from '@/server/services/toolExecution/deviceProxy';
@@ -733,11 +734,40 @@ export class AiAgentService {
         log('execAgent: failed to resolve GitHub token: %O', err);
       }
 
+      // When resuming, inject the recent conversation turns as context so CC can
+      // orient itself even if the native session file was cleared (sandbox recycled
+      // or context overflow caused the CLI to start a fresh session).
+      // Only fetch when there IS a stored session id — for first-turn runs CC has
+      // no prior history to inject.
+      let conversationHistory: ConversationHistoryEntry[] | undefined;
+      if (resumeSessionId) {
+        try {
+          const recentMsgs = await this.messageModel.query({ topicId, pageSize: 200 });
+          const turns = recentMsgs
+            .filter(
+              (m) =>
+                (m.role === 'user' || m.role === 'assistant') &&
+                !m.threadId &&
+                m.content &&
+                m.content !== LOADING_FLAT,
+            )
+            .slice(-30)
+            .map((m) => ({
+              content: m.content ?? '',
+              role: m.role as 'assistant' | 'user',
+            }));
+          if (turns.length > 0) conversationHistory = turns;
+        } catch (err) {
+          log('execAgent: failed to load conversation history for hetero context: %O', err);
+        }
+      }
+
       // Build cloud-specific system context (repo list + workspace info + optional agent-level static context).
       const { buildCloudHeteroContext } =
         await import('@/server/services/heterogeneousAgent/cloudHeteroContext');
       const systemContext = buildCloudHeteroContext({
         agentSystemContext: agentConfig.agencyConfig?.heterogeneousProvider?.systemContext,
+        conversationHistory,
         githubToken,
         repos: topicRepos,
       });
@@ -2006,8 +2036,9 @@ export class AiAgentService {
     );
 
     // 18. Build OperationSkillSet via SkillEngine
-    // Combines builtin skills + user DB skills, filters by platform via enableChecker,
-    // and pairs with agent's enabled plugin IDs for downstream SkillResolver consumption.
+    // Combines builtin skills + user DB skills + agent-document skill bundles,
+    // filters by platform via enableChecker, and pairs with agent's enabled
+    // plugin IDs for downstream SkillResolver consumption.
     let operationSkillSet;
     try {
       const builtinMetas = builtinSkills.map((s) => ({
@@ -2024,9 +2055,23 @@ export class AiAgentService {
         name: s.name,
       }));
 
+      // Agent-document skill bundles surfaced as runtime skills via the shared
+      // `getAgentSkills` source of truth (prefix + index-child resolution lives
+      // there; see `AgentDocumentsService.getAgentSkills`). Identifier is
+      // prefixed (`agent-skills:<filename>`) so it can't collide with builtin
+      // / DB skill names, and we re-use it as `name` so the prompt's
+      // `<skill name="...">` line and the model's `activateSkill(name)` call
+      // carry the same value.
+      const agentSkills = await this.agentDocumentsService.getAgentSkills(resolvedAgentId);
+      const agentSkillMetas = agentSkills.map((skill) => ({
+        description: skill.description,
+        identifier: skill.identifier,
+        name: skill.name,
+      }));
+
       const skillEngine = new SkillEngine({
         enableChecker: (skill) => shouldEnableBuiltinSkill(skill.identifier),
-        skills: [...builtinMetas, ...dbMetas],
+        skills: [...builtinMetas, ...dbMetas, ...agentSkillMetas],
       });
       operationSkillSet = skillEngine.generate(agentPlugins ?? []);
     } catch (error) {
