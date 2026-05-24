@@ -32,6 +32,22 @@ export interface ExecAgentAppContext {
 }
 
 /**
+ * A project-level skill discovered on the device filesystem
+ * (`.agents/skills` / `.claude/skills`) by the client at request time.
+ * Only frontmatter + the absolute SKILL.md path are carried; the SKILL.md
+ * body and directory tree are loaded on demand at activation time via the
+ * readFile / listFiles tools.
+ */
+export interface ProjectSkillMeta {
+  /** Skill description from SKILL.md frontmatter. */
+  description?: string;
+  /** Skill name from frontmatter (falls back to the directory name). */
+  name: string;
+  /** Absolute path to the skill's SKILL.md on the device filesystem. */
+  path: string;
+}
+
+/**
  * Parameters for execAgent - execute a single Agent
  * Either agentId or slug must be provided
  */
@@ -42,13 +58,6 @@ export interface ExecAgentParams {
   appContext?: ExecAgentAppContext;
   /** Whether to auto-start execution after creating operation (default: true) */
   autoStart?: boolean;
-  /**
-   * Runtime of the client initiating this request. Used by the server to
-   * enable `executor: 'client'` tools (e.g. local-system) when the caller
-   * is a desktop Electron client that will receive `tool_execute` events
-   * over the same Agent Gateway WebSocket.
-   */
-  clientRuntime?: 'desktop' | 'web';
   /** Explicit device ID to bind to the topic and activate for this run */
   deviceId?: string;
   /** Optional existing message IDs to include in context */
@@ -71,6 +80,13 @@ export interface ExecAgentParams {
    * sub-tree back to its root.
    */
   parentOperationId?: string;
+  /**
+   * Project-level skills discovered on the device filesystem
+   * (`.agents/skills` / `.claude/skills`) at request time. Surfaced in the
+   * `<available_skills>` list and loaded on demand via the readFile tool.
+   * Only applied when a device is active for this run.
+   */
+  projectSkills?: ProjectSkillMeta[];
   /** The user input/prompt */
   prompt: string;
   /** Override the agent's default provider */

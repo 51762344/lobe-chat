@@ -306,7 +306,6 @@ export class AiAgentService {
       appContext,
       autoStart = true,
       botContext,
-      clientRuntime,
       deviceId: requestedDeviceId,
       botPlatformContext,
       discordContext,
@@ -873,7 +872,13 @@ export class AiAgentService {
         if (!result.success) {
           log('execAgent: remote hetero dispatch failed: %s', result.error);
           await streamManager
-            .publishAgentRuntimeEnd(operationId, 0, { error: result.error }, 'error', result.error)
+            .publishAgentRuntimeEnd({
+              finalState: { error: result.error },
+              operationId,
+              reason: 'error',
+              reasonDetail: result.error,
+              stepIndex: 0,
+            })
             .catch(() => {});
           await this.messageModel.update(assistantMsg.id, {
             content: '',
@@ -1176,17 +1181,25 @@ export class AiAgentService {
       // bypassing the engine's enabledToolIds exclusion. Skipping the
       // assignment here closes that bypass at the source.
       //
-      // 1. If this run explicitly requested a device and that device is online, use it
-      // 2. Otherwise, if the current topic has a bound device and it is online, use that
-      // 3. Otherwise, fall back to the agent-level bound device when it is online
-      // 4. Otherwise, in IM/Bot scenarios, auto-activate only when exactly one device is online
+      // Resolution order ():
+      // 1. boundDeviceId (topic-bound > agent-bound): use if online; if offline,
+      //    respect the explicit choice and stay unrouted — don't silently fall
+      //    back to a different device, that would surprise the user.
+      // 2. No bound device: auto-activate only when EXACTLY ONE device is
+      //    online. Multi-device users must bind explicitly — picking by
+      //    recency / first-online would be a guess that could route tool calls
+      //    to the wrong machine. This applies uniformly to regular chat and
+      //    IM/Bot — the previous "regular-chat does nothing" path was the bug
+      //    behind (the local-system system prompt's
+      //    `{{workingDirectory}}` reached the LLM as a literal, wasting the
+      //    first N steps groping for cwd).
       activeDeviceId = !canUseDevice
         ? undefined
         : boundDeviceId
           ? onlineDevices.some((device) => device.deviceId === boundDeviceId)
             ? boundDeviceId
             : undefined
-          : (discordContext || botContext) && onlineDevices.length === 1
+          : onlineDevices.length === 1
             ? onlineDevices[0].deviceId
             : undefined;
 
@@ -1197,7 +1210,6 @@ export class AiAgentService {
           plugins: agentPlugins,
         },
         canUseDevice,
-        clientRuntime,
         deviceContext: gatewayConfigured
           ? {
               autoActivated: activeDeviceId ? true : undefined,
@@ -1245,7 +1257,7 @@ export class AiAgentService {
       // installed plugin, a LobeHub Skill, or a Klavis manifest declaring
       // `identifier: 'lobe-remote-device'` would otherwise reach the
       // activator-discovery map and let an external bot sender enable it
-      // (LOBE-8768). Centralising the check at the ingest layer means
+      // (). Centralising the check at the ingest layer means
       // every future manifest source automatically inherits the wall.
       const isManifestIngestAllowed = (identifier: string): boolean =>
         canUseDevice || !isDeviceToolIdentifier(identifier);
@@ -1294,35 +1306,22 @@ export class AiAgentService {
         toolSourceMap[manifest.identifier] = 'klavis';
       }
 
-      // Mark tools that must run on the client (desktop Electron) because they
-      // require local IPC / subprocess capabilities:
-      //   - local-system builtin: Electron IPC for file + command execution
-      //   - stdio MCP plugins: subprocess lives on the user's machine
+      // Mark tools that must run on the user's machine (local-system, stdio
+      // MCP) for direct client dispatch only in the standalone deployment
+      // where no DEVICE_GATEWAY is configured. In that mode the legacy
+      // Remote Device proxy isn't available and the embedded Electron runs
+      // both the server and the executor, so tools route in-process.
       //
-      // Two triggers, in priority order:
-      //  (a) `clientRuntime === 'desktop'` — the caller itself is an Electron
-      //      client on the Agent Gateway WS and is ready to receive
-      //      `tool_execute`. This is the Phase 6.4 path and is authoritative
-      //      regardless of whether DEVICE_GATEWAY (the legacy device-proxy) is
-      //      also configured.
-      //  (b) `!gatewayConfigured` — no DEVICE_GATEWAY configured on the server,
-      //      so legacy Remote Device proxy isn't an option and any client
-      //      tooling falls through to the Gateway WS (standalone Electron).
-      //
-      // When DEVICE_GATEWAY is configured AND the caller is a web client, we
-      // leave executor unset so tools route via RemoteDevice proxy.
-      const shouldDispatchToClient = clientRuntime === 'desktop' || !gatewayConfigured;
-      if (shouldDispatchToClient) {
-        // Tools that declare `executors` including `'client'` in their
-        // manifest are dispatched to the client when a desktop caller is
-        // connected. `toolManifestMap` is a superset of `manifestMap`
-        // (includes both enabled plugins and discoverable builtins).
+      // With a device-gateway configured, every caller (desktop UI, web,
+      // IM/bot) converges on the device-gateway path: tool calls tunnel to
+      // a registered device's WS connection. `executor` stays unset so the
+      // RemoteDevice proxy resolves the route.
+      if (!gatewayConfigured) {
         for (const id of Object.keys(toolManifestMap)) {
           if (toolManifestMap[id]?.executors?.includes('client')) {
             toolExecutorMap[id] = 'client';
           }
         }
-        // Stdio MCP plugins: subprocess lives on the user's machine
         for (const plugin of installedPlugins) {
           if (plugin.customParams?.mcp?.type === 'stdio' && manifestMap.has(plugin.identifier)) {
             toolExecutorMap[plugin.identifier] = 'client';
@@ -1409,33 +1408,44 @@ export class AiAgentService {
       };
     }
 
-    // 9.4. Fetch device system info for placeholder variable replacement
-    let deviceSystemInfo: Record<string, string> = {};
-    if (activeDeviceId) {
+    // 9.4. Fetch device system info for placeholder variable replacement.
+    //
+    // Decoupled from activeDeviceId routing (): pulled into a helper
+    // so the device whose info populates the template (`{{hostname}}`,
+    // `{{workingDirectory}}`, etc.) is a separate decision from the device
+    // that tool calls route to. Today they're aligned — but future policy
+    // changes (e.g., showing last-known info for an offline bound device)
+    // belong in this helper, not in the activeDeviceId resolution block.
+    const fetchDeviceSystemInfoForTemplate = async (
+      deviceId: string | undefined,
+    ): Promise<Record<string, string>> => {
+      if (!deviceId) return {};
       try {
-        const systemInfo = await deviceProxy.queryDeviceSystemInfo(this.userId, activeDeviceId);
-        if (systemInfo) {
-          const activeDevice = onlineDevices.find((d) => d.deviceId === activeDeviceId);
-          deviceSystemInfo = {
-            arch: systemInfo.arch,
-            desktopPath: systemInfo.desktopPath,
-            documentsPath: systemInfo.documentsPath,
-            downloadsPath: systemInfo.downloadsPath,
-            homePath: systemInfo.homePath,
-            hostname: activeDevice?.hostname ?? 'unknown',
-            musicPath: systemInfo.musicPath,
-            picturesPath: systemInfo.picturesPath,
-            platform: activeDevice?.platform ?? 'unknown',
-            userDataPath: systemInfo.userDataPath,
-            videosPath: systemInfo.videosPath,
-            workingDirectory: systemInfo.workingDirectory,
-          };
-          log('execAgent: fetched device system info for %s', activeDeviceId);
-        }
+        const systemInfo = await deviceProxy.queryDeviceSystemInfo(this.userId, deviceId);
+        if (!systemInfo) return {};
+        const device = onlineDevices.find((d) => d.deviceId === deviceId);
+        log('execAgent: fetched device system info for %s', deviceId);
+        return {
+          arch: systemInfo.arch,
+          desktopPath: systemInfo.desktopPath,
+          documentsPath: systemInfo.documentsPath,
+          downloadsPath: systemInfo.downloadsPath,
+          homePath: systemInfo.homePath,
+          hostname: device?.hostname ?? 'unknown',
+          musicPath: systemInfo.musicPath,
+          picturesPath: systemInfo.picturesPath,
+          platform: device?.platform ?? 'unknown',
+          userDataPath: systemInfo.userDataPath,
+          videosPath: systemInfo.videosPath,
+          workingDirectory: systemInfo.workingDirectory,
+        };
       } catch (error) {
         log('execAgent: failed to fetch device system info: %O', error);
+        return {};
       }
-    }
+    };
+
+    const deviceSystemInfo = await fetchDeviceSystemInfoForTemplate(activeDeviceId);
 
     // 9.5. Build Agent Management context
     // - availableAgents is injected whenever the user is in auto mode (so the supervisor
@@ -2069,9 +2079,39 @@ export class AiAgentService {
         name: skill.name,
       }));
 
+      // Project skills are filesystem SKILL.md discovered on the device. They
+      // are only meaningful when a device is active (readFile resolves against
+      // it). Only `location` (absolute SKILL.md path) flows through — the
+      // skill's directory tree is enumerated lazily at activation time via
+      // `local-system.listFiles` over the device gateway, keeping the op-param
+      // payload small.
+      const projectMetas =
+        activeDeviceId && params.projectSkills?.length
+          ? params.projectSkills.map((s) => ({
+              description: s.description ?? '',
+              identifier: `project:${s.name}`,
+              location: s.path,
+              name: s.name,
+              source: 'project' as const,
+            }))
+          : [];
+
+      // Precedence on name collision: project > db > agent-skills > builtin.
+      // Agent-skills carry the `agent-skills:` prefix in their `name`, so they
+      // can only collide with each other — but we still dedupe by name to keep
+      // a single shape for the SkillEngine input.
+      const seenNames = new Set<string>();
+      const skills = [...projectMetas, ...dbMetas, ...agentSkillMetas, ...builtinMetas].filter(
+        (skill) => {
+          if (seenNames.has(skill.name)) return false;
+          seenNames.add(skill.name);
+          return true;
+        },
+      );
+
       const skillEngine = new SkillEngine({
         enableChecker: (skill) => shouldEnableBuiltinSkill(skill.identifier),
-        skills: [...builtinMetas, ...dbMetas, ...agentSkillMetas],
+        skills,
       });
       operationSkillSet = skillEngine.generate(agentPlugins ?? []);
     } catch (error) {

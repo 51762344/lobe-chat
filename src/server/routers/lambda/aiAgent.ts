@@ -146,12 +146,6 @@ const ExecAgentSchema = z
       .optional(),
     /** Whether to auto-start execution after creating operation */
     autoStart: z.boolean().optional().default(true),
-    /**
-     * Runtime of the client initiating this request.
-     * 'desktop' enables `executor: 'client'` tools (local-system, stdio MCP)
-     * to be dispatched over the Agent Gateway WS.
-     */
-    clientRuntime: z.enum(['desktop', 'web']).optional(),
     /** Explicit device ID to bind to the topic and activate for this run */
     deviceId: z.string().optional(),
     /** Optional existing message IDs to include in context */
@@ -160,6 +154,20 @@ const ExecAgentSchema = z
     fileIds: z.array(z.string()).optional(),
     /** Parent message ID for regeneration/continue (skip user message creation, branch from this message) */
     parentMessageId: z.string().optional(),
+    /**
+     * Project-level skills discovered on the device filesystem
+     * (`.agents/skills` / `.claude/skills`) by the client at request time.
+     * Surfaced in `<available_skills>` and loaded on demand via readFile.
+     */
+    projectSkills: z
+      .array(
+        z.object({
+          description: z.string().optional(),
+          name: z.string(),
+          path: z.string(),
+        }),
+      )
+      .optional(),
     /** The user input/prompt */
     prompt: z.string(),
     /**
@@ -371,7 +379,7 @@ const AgentStreamEventSchema = z.object({
 /**
  * Schema for `aiAgent.heteroIngest` — accepts a batch of producer-side
  * `AgentStreamEvent`s from `lh hetero exec`. `topicId` is required (operationId
- * → topic reverse-lookup is unreliable per LOBE-8516 design decision).
+ * → topic reverse-lookup is unreliable per design decision).
  */
 const HeteroIngestSchema = z.object({
   agentType: z.enum(['claude-code', 'codex']),
@@ -619,11 +627,11 @@ export const aiAgentRouter = router({
       prompt,
       appContext,
       autoStart = true,
-      clientRuntime,
       deviceId,
       existingMessageIds = [],
       fileIds,
       parentMessageId,
+      projectSkills,
       resumeApproval,
       trigger,
       userInterventionConfig,
@@ -636,11 +644,11 @@ export const aiAgentRouter = router({
         agentId,
         appContext,
         autoStart,
-        clientRuntime,
         deviceId,
         existingMessageIds,
         fileIds,
         parentMessageId,
+        projectSkills,
         prompt,
         // When parentMessageId is provided, this is a regeneration/continue or a
         // human-approval resume — either way, skip user message creation.
