@@ -74,6 +74,7 @@ import {
   isLobeAiAgentSlug,
   resolveAgentSelfIterationCapability,
 } from '@/server/services/agentSignal/featureGate';
+import { shouldSuppressSignal } from '@/server/services/agentSignal/suppressSignal';
 import { DocumentService } from '@/server/services/document';
 import { FileService } from '@/server/services/file';
 import { HeterogeneousAgentService } from '@/server/services/heterogeneousAgent';
@@ -773,6 +774,7 @@ export class AiAgentService {
 
       const heteroParams = {
         agentType: heteroType,
+        assistantMessageId: assistantMsg.id,
         githubToken,
         jwt: operationJwt,
         operationId,
@@ -903,49 +905,89 @@ export class AiAgentService {
             userMessageId: userMsg?.id ?? parentMessageId ?? '',
           };
         }
-      } else if (requestedDeviceId) {
-        // Local CLI (claude-code / codex) — dispatch to user's connected desktop.
-        const result = await deviceProxy.dispatchAgentRun({
-          ...heteroParams,
-          deviceId: requestedDeviceId,
-        });
-        if (!result.success) {
-          log('execAgent: hetero device dispatch failed: %s', result.error);
-          await this.messageModel.update(assistantMsg.id, {
-            content: '',
-            error: {
-              body: { detail: result.error },
-              message: result.error ?? 'Device dispatch failed',
-              type: 'ServerAgentRuntimeError',
-            },
-          });
-          return {
-            agentId: resolvedAgentId,
-            assistantMessageId: assistantMsg.id,
-            autoStarted: false,
-            createdAt: new Date().toISOString(),
-            error: result.error,
-            message: 'Hetero agent device dispatch failed',
-            operationId,
-            status: 'error',
-            success: false,
-            timestamp: new Date().toISOString(),
-            topicId,
-            userMessageId: userMsg?.id ?? parentMessageId ?? '',
-          };
-        }
       } else {
-        // Cloud sandbox path — only for local CLI agents (claude-code / codex).
-        // Remote agents (openclaw / hermes) always require a bound device.
-        const { spawnHeteroSandbox } =
-          await import('@/server/services/heterogeneousAgent/sandboxRunner');
-        spawnHeteroSandbox({
-          ...heteroParams,
-          agentType: heteroType as 'claude-code' | 'codex',
-          marketService: this.marketService,
-        }).catch((err) => {
-          log('execAgent: hetero sandbox spawn failed: %O', err);
-        });
+        // Local CLI hetero (claude-code / codex) — fork between device dispatch
+        // and cloud sandbox based on:
+        //   1. requestedDeviceId (topic-level override) — always wins
+        //   2. agencyConfig.executionTarget (agent-level default)
+        //        - 'device'  → dispatch to boundDeviceId (errors if unset/offline)
+        //        - 'sandbox' → cloud sandbox
+        //        - 'local' / undefined → cloud sandbox (server can't spawn locally)
+        const executionTarget = agentConfig.agencyConfig?.executionTarget;
+        const dispatchDeviceId = requestedDeviceId || agentConfig.agencyConfig?.boundDeviceId;
+        const useDevice = !!requestedDeviceId || executionTarget === 'device';
+
+        if (useDevice) {
+          if (!dispatchDeviceId) {
+            log('execAgent: hetero executionTarget=device but no boundDeviceId set');
+            await this.messageModel.update(assistantMsg.id, {
+              content: '',
+              error: {
+                body: {
+                  detail:
+                    'No device bound. Pick a device in the Execution Device switcher, or switch to Cloud sandbox.',
+                },
+                message: 'No bound device for hetero agent',
+                type: 'ServerAgentRuntimeError',
+              },
+            });
+            return {
+              agentId: resolvedAgentId,
+              assistantMessageId: assistantMsg.id,
+              autoStarted: false,
+              createdAt: new Date().toISOString(),
+              error: 'No bound device',
+              message: 'Hetero agent requires a bound device',
+              operationId,
+              status: 'error',
+              success: false,
+              timestamp: new Date().toISOString(),
+              topicId,
+              userMessageId: userMsg?.id ?? parentMessageId ?? '',
+            };
+          }
+          const result = await deviceProxy.dispatchAgentRun({
+            ...heteroParams,
+            deviceId: dispatchDeviceId,
+          });
+          if (!result.success) {
+            log('execAgent: hetero device dispatch failed: %s', result.error);
+            await this.messageModel.update(assistantMsg.id, {
+              content: '',
+              error: {
+                body: { detail: result.error },
+                message: result.error ?? 'Device dispatch failed',
+                type: 'ServerAgentRuntimeError',
+              },
+            });
+            return {
+              agentId: resolvedAgentId,
+              assistantMessageId: assistantMsg.id,
+              autoStarted: false,
+              createdAt: new Date().toISOString(),
+              error: result.error,
+              message: 'Hetero agent device dispatch failed',
+              operationId,
+              status: 'error',
+              success: false,
+              timestamp: new Date().toISOString(),
+              topicId,
+              userMessageId: userMsg?.id ?? parentMessageId ?? '',
+            };
+          }
+        } else {
+          // Cloud sandbox path — only for local CLI agents (claude-code / codex).
+          // Remote agents (openclaw / hermes) always require a bound device.
+          const { spawnHeteroSandbox } =
+            await import('@/server/services/heterogeneousAgent/sandboxRunner');
+          spawnHeteroSandbox({
+            ...heteroParams,
+            agentType: heteroType as 'claude-code' | 'codex',
+            marketService: this.marketService,
+          }).catch((err) => {
+            log('execAgent: hetero sandbox spawn failed: %O', err);
+          });
+        }
       }
 
       let gatewayToken: string | undefined;
@@ -1181,7 +1223,11 @@ export class AiAgentService {
       // bypassing the engine's enabledToolIds exclusion. Skipping the
       // assignment here closes that bypass at the source.
       //
-      // Resolution order ():
+      // Resolution order:
+      // 0. executionTarget === 'sandbox': always skip — sandbox and device are
+      //    mutually exclusive. Without this gate a single online device would
+      //    be auto-activated and local-system tool calls would silently route
+      //    to that device instead of being suppressed for the sandbox session.
       // 1. boundDeviceId (topic-bound > agent-bound): use if online; if offline,
       //    respect the explicit choice and stay unrouted — don't silently fall
       //    back to a different device, that would surprise the user.
@@ -1193,15 +1239,17 @@ export class AiAgentService {
       //    behind (the local-system system prompt's
       //    `{{workingDirectory}}` reached the LLM as a literal, wasting the
       //    first N steps groping for cwd).
-      activeDeviceId = !canUseDevice
-        ? undefined
-        : boundDeviceId
-          ? onlineDevices.some((device) => device.deviceId === boundDeviceId)
-            ? boundDeviceId
-            : undefined
-          : onlineDevices.length === 1
-            ? onlineDevices[0].deviceId
-            : undefined;
+      const regularAgentExecutionTarget = agentConfig.agencyConfig?.executionTarget;
+      activeDeviceId =
+        !canUseDevice || regularAgentExecutionTarget === 'sandbox'
+          ? undefined
+          : boundDeviceId
+            ? onlineDevices.some((device) => device.deviceId === boundDeviceId)
+              ? boundDeviceId
+              : undefined
+            : onlineDevices.length === 1
+              ? onlineDevices[0].deviceId
+              : undefined;
 
       const toolsEngine = createServerAgentToolsEngine(toolsContext, {
         additionalManifests: [...lobehubSkillManifests, ...klavisManifests],
@@ -1843,26 +1891,33 @@ export class AiAgentService {
       // It must not block the primary agent execution path; local Workflow/QStash
       // stalls would otherwise leave the conversation with only the user message
       // persisted and no assistant placeholder or operation row.
-      void enqueueAgentSignalSourceEvent(
-        {
-          payload: {
-            agentId: resolvedAgentId,
-            message: prompt,
-            threadId: appContext?.threadId ?? undefined,
-            topicId,
-            trigger,
-            messageId: userMessageRecord.id,
+      //
+      // Skip when this execAgent invocation is itself an Agent Signal background run
+      // (e.g. memory writer, self-iteration reviewer). Otherwise the analyzeIntent
+      // policy would re-analyze the synthesised user prompt and recursively trigger
+      // another Agent Signal pass.
+      if (!shouldSuppressSignal({ appContext, slug: agentSlug ?? undefined })) {
+        void enqueueAgentSignalSourceEvent(
+          {
+            payload: {
+              agentId: resolvedAgentId,
+              message: prompt,
+              threadId: appContext?.threadId ?? undefined,
+              topicId,
+              trigger,
+              messageId: userMessageRecord.id,
+            },
+            sourceId: userMessageRecord.id,
+            sourceType: 'agent.user.message',
           },
-          sourceId: userMessageRecord.id,
-          sourceType: 'agent.user.message',
-        },
-        {
-          agentId: resolvedAgentId,
-          userId: this.userId,
-        },
-      ).catch((error) => {
-        log('execAgent: failed to enqueue user message Agent Signal source event: %O', error);
-      });
+          {
+            agentId: resolvedAgentId,
+            userId: this.userId,
+          },
+        ).catch((error) => {
+          log('execAgent: failed to enqueue user message Agent Signal source event: %O', error);
+        });
+      }
     }
 
     // 14. Create assistant message placeholder in database
@@ -2079,22 +2134,36 @@ export class AiAgentService {
         name: skill.name,
       }));
 
-      // Project skills are filesystem SKILL.md discovered on the device. They
-      // are only meaningful when a device is active (readFile resolves against
-      // it). Only `location` (absolute SKILL.md path) flows through — the
-      // skill's directory tree is enumerated lazily at activation time via
-      // `local-system.listFiles` over the device gateway, keeping the op-param
-      // payload small.
+      // Project skills are filesystem SKILL.md discovered on the device. Their
+      // presence in `params.projectSkills` is itself proof that a client just
+      // scanned the working directory, so we surface them in
+      // `<available_skills>` unconditionally — decoupled from `activeDeviceId`
+      // (a routing decision for `LocalSystemManifest` injection that can
+      // legitimately be `undefined` for multi-device-no-bind or
+      // device-just-went-offline cases). Whether SKILL.md can actually be read
+      // at activation time is re-gated at the executor in
+      // `serverRuntimes/skills.ts` — there `deviceFileAccess` is only built
+      // when `activeDeviceId` resolves, and a missing reader naturally fails
+      // the `activateSkill` call rather than silently hiding the option.
+      // Only `location` (absolute SKILL.md path) flows through; the directory
+      // tree is enumerated lazily at activation time via
+      // `local-system.listFiles`, keeping the op-param payload small.
       const projectMetas =
-        activeDeviceId && params.projectSkills?.length
-          ? params.projectSkills.map((s) => ({
-              description: s.description ?? '',
-              identifier: `project:${s.name}`,
-              location: s.path,
-              name: s.name,
-              source: 'project' as const,
-            }))
-          : [];
+        params.projectSkills?.map((s) => ({
+          description: s.description ?? '',
+          identifier: `project:${s.name}`,
+          location: s.path,
+          name: s.name,
+          source: 'project' as const,
+        })) ?? [];
+
+      if (params.projectSkills?.length) {
+        log(
+          'execAgent: projectSkills merged: %d (activeDeviceId=%s)',
+          projectMetas.length,
+          activeDeviceId ?? 'none',
+        );
+      }
 
       // Precedence on name collision: project > db > agent-skills > builtin.
       // Agent-skills carry the `agent-skills:` prefix in their `name`, so they
