@@ -36,6 +36,7 @@ import type {
   ExecGroupAgentResult,
   ExecSubAgentParams,
   ExecSubAgentResult,
+  ExecVirtualSubAgentParams,
   LobeAgentAgencyConfig,
   MessagePluginItem,
   UserInterventionConfig,
@@ -94,6 +95,7 @@ import {
   resolveAgentSelfIterationCapability,
 } from '@/server/services/agentSignal/featureGate';
 import { shouldSuppressSignal } from '@/server/services/agentSignal/suppressSignal';
+import { ComposioService } from '@/server/services/composio';
 import { deviceGateway } from '@/server/services/deviceGateway';
 import { DocumentService } from '@/server/services/document';
 import { FileService } from '@/server/services/file';
@@ -103,7 +105,6 @@ import {
 } from '@/server/services/file/resolveAttachments';
 import { HeterogeneousAgentService } from '@/server/services/heterogeneousAgent';
 import type { ConversationHistoryEntry } from '@/server/services/heterogeneousAgent/cloudHeteroContext';
-import { KlavisService } from '@/server/services/klavis';
 import { MarketService } from '@/server/services/market';
 import { markdownToTxt } from '@/utils/markdownToTxt';
 
@@ -286,7 +287,7 @@ export class AiAgentService {
   private readonly topicModel: TopicModel;
   private readonly agentRuntimeService: AgentRuntimeService;
   private readonly marketService: MarketService;
-  private readonly klavisService: KlavisService;
+  private readonly composioService: ComposioService;
 
   private readonly workspaceId?: string;
 
@@ -318,14 +319,15 @@ export class AiAgentService {
       // high-level pipelines mid-step. See AgentRuntimeDelegate. New high-level
       // capabilities the runtime calls into go in this `delegate` object.
       //
-      // `execSubAgent` is an auto-bound arrow field, so no `.bind(this)`.
+      // Arrow fields are auto-bound, so no `.bind(this)`.
       delegate: {
         execSubAgent: this.execSubAgent,
+        execVirtualSubAgent: this.execVirtualSubAgent,
       },
       workspaceId: wsId,
     });
     this.marketService = new MarketService({ userInfo: { userId } });
-    this.klavisService = new KlavisService({ db, userId, workspaceId: wsId });
+    this.composioService = new ComposioService({ db, userId });
   }
 
   private async resolveOperationTaskId(
@@ -415,9 +417,10 @@ export class AiAgentService {
    * Execute a single agent step against this service's runtime.
    *
    * Delegates to the internal AgentRuntimeService, which is already wired with
-   * the `execSubAgent` fork callback. The QStash step worker drives stepping
-   * through here so `lobe-agent.callSubAgent` can fork sub-agents — building a
-   * bare runtime there would lose the callback and fail with SUB_AGENT_UNAVAILABLE.
+   * the agent-invocation fork callbacks. The QStash step worker drives stepping
+   * through here so `lobe-agent.callSubAgent` can fork virtual sub-agents —
+   * building a bare runtime there would lose the callback and fail with
+   * SUB_AGENT_UNAVAILABLE.
    */
   executeStep(params: AgentExecutionParams): Promise<AgentExecutionResult> {
     return this.agentRuntimeService.executeStep(params);
@@ -1390,7 +1393,7 @@ export class AiAgentService {
 
     // These are needed outside the tools block (for agent management context, skill engine, etc.)
     let lobehubSkillManifests: LobeToolManifest[] = [];
-    let klavisManifests: LobeToolManifest[] = [];
+    let composioManifests: LobeToolManifest[] = [];
     let connectorManifests: ReturnType<typeof buildConnectorManifests> = [];
     let agentPlugins: string[] = [...(agentConfig?.plugins ?? []), ...(additionalPluginIds || [])];
 
@@ -1455,7 +1458,7 @@ export class AiAgentService {
           : [];
 
       // Only connectors WITH a real MCP endpoint (mcpServerUrl or stdio) can replace plugins in the
-      // manifest. Connectors WITHOUT an endpoint (e.g. Lobehub/Klavis OAuth skills synced via
+      // manifest. Connectors WITHOUT an endpoint (e.g. Lobehub/Composio OAuth skills synced via
       // syncToolsFromClient) must continue using their original plugin executor path — otherwise
       // after humanIntervention approval the runtime tries to call mcpServerUrl='' and returns empty.
       const connectorsMcp = connectors.filter(
@@ -1500,24 +1503,24 @@ export class AiAgentService {
       }
       log('execAgent: got %d lobehub skill manifests', lobehubSkillManifests.length);
 
-      // 5d. Fetch Klavis tool manifests from database
+      // 5d. Fetch Composio tool manifests from database
       try {
-        klavisManifests = await this.klavisService.getKlavisManifests();
+        composioManifests = await this.composioService.getComposioManifests();
       } catch (error) {
-        log('execAgent: failed to fetch klavis manifests: %O', error);
+        log('execAgent: failed to fetch composio manifests: %O', error);
       }
-      log('execAgent: got %d klavis manifests', klavisManifests.length);
+      log('execAgent: got %d composio manifests', composioManifests.length);
 
-      // 5d-1. Patch Lobehub/Klavis manifests AND community-MCP plugin manifests
+      // 5d-1. Patch Lobehub/Composio manifests AND community-MCP plugin manifests
       // with connector tool permissions. This enables needs_approval (→
       // humanIntervention: 'required') and disabled (→ blocking description) for
       // any tool managed via the connector system but executed through a
-      // non-connector path (Lobehub/Klavis skills, community MCP plugins).
+      // non-connector path (Lobehub/Composio skills, community MCP plugins).
       // The 'disabled' hard-block is already enforced universally in
       // ToolExecutionService; this surfaces the permission to the model too.
       if (
         lobehubSkillManifests.length > 0 ||
-        klavisManifests.length > 0 ||
+        composioManifests.length > 0 ||
         pluginsWithoutConnectors.length > 0
       ) {
         try {
@@ -1526,7 +1529,7 @@ export class AiAgentService {
           const { ConnectorToolModel } = await import('@/database/models/connectorTool');
           const allIdentifiers = [
             ...lobehubSkillManifests.map((m) => m.identifier),
-            ...klavisManifests.map((m) => m.identifier),
+            ...composioManifests.map((m) => m.identifier),
             ...pluginsWithoutConnectors.map((p) => p.identifier),
           ];
           const connectorEntries =
@@ -1552,7 +1555,7 @@ export class AiAgentService {
                 : m;
             });
 
-            klavisManifests = klavisManifests.map((m) => {
+            composioManifests = composioManifests.map((m) => {
               const perms = connectorToolsMap.get(m.identifier);
               return perms && perms.size > 0
                 ? (patchManifestWithPermissions(m as any, perms as any) as any)
@@ -1684,7 +1687,7 @@ export class AiAgentService {
       );
 
       const toolsEngine = createServerAgentToolsEngine(toolsContext, {
-        additionalManifests: [...lobehubSkillManifests, ...klavisManifests, ...connectorManifests],
+        additionalManifests: [...lobehubSkillManifests, ...composioManifests, ...connectorManifests],
         agentConfig: {
           chatConfig: agentConfig.chatConfig ?? undefined,
           plugins: agentPlugins,
@@ -1714,9 +1717,9 @@ export class AiAgentService {
           ...agentPlugins,
           ...(disableLocalSystem ? [] : [LocalSystemManifest.identifier]),
           RemoteDeviceManifest.identifier,
-          // Include LobeHub Skills and Klavis tools so they are passed to generateToolsDetailed
+          // Include LobeHub Skills and Composio tools so they are passed to generateToolsDetailed
           ...lobehubSkillManifests.map((m) => m.identifier),
-          ...klavisManifests.map((m) => m.identifier),
+          ...composioManifests.map((m) => m.identifier),
           // Connector manifests are also injected as additionalManifests
           ...connectorManifests.map((m) => m.identifier),
         ]),
@@ -1737,7 +1740,7 @@ export class AiAgentService {
 
       // Single guard for every `toolManifestMap[id] = ...` ingest below.
       // Mirrors the post-merge filter in `createServerToolsEngine`: an
-      // installed plugin, a LobeHub Skill, or a Klavis manifest declaring
+      // installed plugin, a LobeHub Skill, or a Composio manifest declaring
       // `identifier: 'lobe-remote-device'` would otherwise reach the
       // activator-discovery map and let an external bot sender enable it
       // (). Centralising the check at the ingest layer means
@@ -1811,14 +1814,14 @@ export class AiAgentService {
         toolManifestMap[LocalSystemManifest.identifier] = LocalSystemManifest as LobeToolManifest;
       }
 
-      // Include lobehub skill and klavis manifests for activator discovery
+      // Include lobehub skill and composio manifests for activator discovery
       for (const manifest of lobehubSkillManifests) {
         if (!isManifestIngestAllowed(manifest.identifier)) continue;
         if (!toolManifestMap[manifest.identifier]) {
           toolManifestMap[manifest.identifier] = manifest;
         }
       }
-      for (const manifest of klavisManifests) {
+      for (const manifest of composioManifests) {
         if (!isManifestIngestAllowed(manifest.identifier)) continue;
         if (!toolManifestMap[manifest.identifier]) {
           toolManifestMap[manifest.identifier] = manifest;
@@ -1829,9 +1832,9 @@ export class AiAgentService {
         if (!isManifestIngestAllowed(manifest.identifier)) continue;
         toolSourceMap[manifest.identifier] = 'lobehubSkill';
       }
-      for (const manifest of klavisManifests) {
+      for (const manifest of composioManifests) {
         if (!isManifestIngestAllowed(manifest.identifier)) continue;
-        toolSourceMap[manifest.identifier] = 'klavis';
+        toolSourceMap[manifest.identifier] = 'composio';
       }
 
       // Mark tools that must run on the user's machine (local-system, stdio
@@ -1863,10 +1866,10 @@ export class AiAgentService {
       }
 
       log(
-        'execAgent: generated %d tools, %d lobehub skills, %d klavis tools',
+        'execAgent: generated %d tools, %d lobehub skills, %d composio tools',
         tools?.length ?? 0,
         lobehubSkillManifests.length,
-        klavisManifests.length,
+        composioManifests.length,
       );
 
       const agentSelfIterationEnabled = agentConfig.chatConfig?.selfIteration?.enabled === true;
@@ -2092,12 +2095,12 @@ export class AiAgentService {
           name: manifest.meta?.title || manifest.identifier,
           type: 'lobehub-skill' as const,
         })),
-        // Klavis tools
-        ...klavisManifests.map((manifest) => ({
+        // Composio tools
+        ...composioManifests.map((manifest) => ({
           description: manifest.meta?.description,
           identifier: manifest.identifier,
           name: manifest.meta?.title || manifest.identifier,
-          type: 'klavis' as const,
+          type: 'composio' as const,
         })),
         // Custom connectors (user-added MCP servers)
         ...connectorManifests.map((manifest) => ({
@@ -2296,7 +2299,7 @@ export class AiAgentService {
         : undefined;
 
     // 13. Create user message in database
-    // Include threadId if provided (for SubAgent task execution in isolated Thread)
+    // Include threadId if provided (for isolated agent execution)
     const userMessageRecord = runFromHistory
       ? undefined
       : await this.messageModel.create({
@@ -2344,7 +2347,7 @@ export class AiAgentService {
     }
 
     // 14. Create assistant message placeholder in database
-    // Include threadId if provided (for SubAgent task execution in isolated Thread)
+    // Include threadId if provided (for isolated agent execution)
     const assistantMessageRecord = await this.messageModel.create({
       agentId: persistAgentId,
       content: LOADING_FLAT,
@@ -2856,35 +2859,46 @@ export class AiAgentService {
   }
 
   /**
-   * Execute SubAgent task (supports both Group and Single Agent mode)
+   * Execute an agent in an isolated Thread context.
    *
-   * This method is called by Supervisor (Group mode) or Agent (Single mode)
-   * to delegate tasks to SubAgents. Each task runs in an isolated Thread context.
-   *
-   * - Group mode: pass groupId, Thread will be associated with the Group
-   * - Single Agent mode: omit groupId, Thread will only be associated with the Agent
-   *
-   * Flow:
-   * 1. Create Thread (type='isolation', status='processing')
-   * 2. Delegate to execAgent with threadId in appContext
-   * 3. Store operationId in Thread metadata
+   * Group/callAgent paths use this entry. It does not mark the child as a
+   * virtual sub-agent and it does not install the async completion bridge.
    */
-  // Arrow field (not a method) so it stays bound to this instance when handed to
-  // AgentRuntimeService as the `execSubAgent` fork callback — no `.bind(this)`.
-  execSubAgent = async (params: ExecSubAgentParams): Promise<ExecSubAgentResult> => {
-    const {
-      groupId,
-      topicId,
-      parentMessageId,
-      agentId,
-      instruction,
-      title,
-      parentOperationId,
-      resumeParentOnComplete,
-    } = params;
+  // Arrow field (not a method) so it stays bound when handed to AgentRuntimeService.
+  execSubAgent = async (params: ExecSubAgentParams): Promise<ExecSubAgentResult> =>
+    this.execAgentThreadRun(params, {
+      isSubAgent: false,
+      logScope: 'execSubAgent',
+    });
+
+  /**
+   * Execute a virtual sub-agent created by `lobe-agent.callSubAgent`.
+   *
+   * This path is a child operation of the current agent run. It is marked as a
+   * sub-agent so it cannot recursively spawn more sub-agents, and it registers
+   * the bridge that backfills the parent's placeholder tool message.
+   */
+  execVirtualSubAgent = async (params: ExecVirtualSubAgentParams): Promise<ExecSubAgentResult> =>
+    this.execAgentThreadRun(params, {
+      isSubAgent: true,
+      logScope: 'execVirtualSubAgent',
+      resumeParentOnComplete: true,
+    });
+
+  private async execAgentThreadRun(
+    params: ExecSubAgentParams | ExecVirtualSubAgentParams,
+    options: {
+      isSubAgent: boolean;
+      logScope: 'execSubAgent' | 'execVirtualSubAgent';
+      resumeParentOnComplete?: boolean;
+    },
+  ): Promise<ExecSubAgentResult> {
+    const { groupId, topicId, parentMessageId, agentId, instruction, title, parentOperationId } =
+      params;
 
     log(
-      'execSubAgent: agentId=%s, groupId=%s, topicId=%s, instruction=%s',
+      '%s: agentId=%s, groupId=%s, topicId=%s, instruction=%s',
+      options.logScope,
       agentId,
       groupId,
       topicId,
@@ -2903,7 +2917,7 @@ export class AiAgentService {
         .catch(() => {});
     }
 
-    // 1. Create Thread for isolated task execution
+    // 1. Create Thread for isolated agent execution
     const thread = await this.threadModel.create({
       agentId,
       groupId,
@@ -2914,10 +2928,10 @@ export class AiAgentService {
     });
 
     if (!thread) {
-      throw new Error('Failed to create thread for task execution');
+      throw new Error('Failed to create thread for agent execution');
     }
 
-    log('execSubAgent: created thread %s', thread.id);
+    log('%s: created thread %s', options.logScope, thread.id);
 
     // 2. Update Thread status to processing with startedAt timestamp
     const startedAt = new Date().toISOString();
@@ -2926,14 +2940,19 @@ export class AiAgentService {
       status: ThreadStatus.Processing,
     });
 
-    // 3. Create hooks for updating Thread metadata and task message
-    const threadHooks = this.createThreadHooks(thread.id, startedAt, parentMessageId);
-    // For the deferred-tool path, also register the completion bridge that
+    // 3. Create hooks for updating Thread metadata and source message
+    const threadHooks = this.createThreadHooks(
+      thread.id,
+      startedAt,
+      parentMessageId,
+      options.logScope,
+    );
+    // For the virtual sub-agent path, also register the completion bridge that
     // backfills the parent's placeholder tool message and resumes the parked
-    // parent op once the whole batch is done. Registered last so its
-    // tool-message backfill (content + pluginState) is the final write.
+    // parent op once the child run is done. Registered last so its tool-message
+    // backfill (content + pluginState) is the final write.
     const hooks =
-      resumeParentOnComplete && parentOperationId
+      options.resumeParentOnComplete && parentOperationId
         ? [
             ...threadHooks,
             this.createSubAgentBridgeHook(parentOperationId, parentMessageId, thread.id),
@@ -2953,16 +2972,23 @@ export class AiAgentService {
         ).findById(parentOperationId);
         inheritedTrigger = parentOp?.trigger ?? undefined;
       } catch (error) {
-        log('execSubAgent: failed to read parent operation trigger: %O', error);
+        log('%s: failed to read parent operation trigger: %O', options.logScope, error);
       }
     }
 
+    const appContext: NonNullable<InternalExecAgentParams['appContext']> = {
+      groupId,
+      isSubAgent: options.isSubAgent,
+      threadId: thread.id,
+      topicId,
+    };
+
     // 4. Delegate to execAgent with threadId in appContext and hooks
     // The instruction will be created as user message in the Thread
-    // Use headless mode to skip human approval in async task execution
+    // Use headless mode to skip human approval in async agent execution
     const result = await this.execAgent({
       agentId,
-      appContext: { groupId, threadId: thread.id, topicId },
+      appContext,
       autoStart: true,
       hooks,
       parentOperationId,
@@ -2972,7 +2998,8 @@ export class AiAgentService {
     });
 
     log(
-      'execSubAgent: delegated to execAgent, operationId=%s, success=%s',
+      '%s: delegated to execAgent, operationId=%s, success=%s',
+      options.logScope,
       result.operationId,
       result.success,
     );
@@ -3028,7 +3055,7 @@ export class AiAgentService {
       success: result.success ?? false,
       threadId: thread.id,
     };
-  };
+  }
 
   /**
    * Create step lifecycle callbacks for updating Thread metadata
@@ -3036,12 +3063,13 @@ export class AiAgentService {
    *
    * @param threadId - The Thread ID to update
    * @param startedAt - The start time ISO string
-   * @param sourceMessageId - The task message ID (sourceMessageId from Thread) to update with summary
+   * @param sourceMessageId - The source message ID from Thread to update with summary
    */
   private createThreadMetadataCallbacks(
     threadId: string,
     startedAt: string,
     sourceMessageId: string,
+    logScope: 'execSubAgent' | 'execVirtualSubAgent' = 'execSubAgent',
   ): StepLifecycleCallbacks {
     // Accumulator for tracking metrics across steps
     let accumulatedToolCalls = 0;
@@ -3067,9 +3095,9 @@ export class AiAgentService {
               totalToolCalls: accumulatedToolCalls,
             },
           });
-          log('execSubAgent: updated thread %s metadata after step %d', threadId, state.stepCount);
+          log('%s: updated thread %s metadata after step %d', logScope, threadId, state.stepCount);
         } catch (error) {
-          log('execSubAgent: failed to update thread metadata: %O', error);
+          log('%s: failed to update thread metadata: %O', logScope, error);
         }
       },
 
@@ -3101,13 +3129,13 @@ export class AiAgentService {
           }
         }
 
-        // Log error when task fails
+        // Log error when the isolated run fails
         if (reason === 'error' && finalState.error) {
-          console.error('execSubAgent: task failed for thread %s:', threadId, finalState.error);
+          console.error('%s: run failed for thread %s:', logScope, threadId, finalState.error);
         }
 
         try {
-          // Extract summary from last assistant message and update task message content
+          // Extract summary from last assistant message and update source message content
           const lastAssistantMessage = finalState.messages
             ?.slice()
             .reverse()
@@ -3117,7 +3145,7 @@ export class AiAgentService {
             await this.messageModel.update(sourceMessageId, {
               content: lastAssistantMessage.content,
             });
-            log('execSubAgent: updated task message %s with summary', sourceMessageId);
+            log('%s: updated source message %s with summary', logScope, sourceMessageId);
           }
 
           // Format error for proper serialization (Error objects don't serialize with JSON.stringify)
@@ -3140,13 +3168,14 @@ export class AiAgentService {
           });
 
           log(
-            'execSubAgent: thread %s completed with status %s, reason: %s',
+            '%s: thread %s completed with status %s, reason: %s',
+            logScope,
             threadId,
             status,
             reason,
           );
         } catch (error) {
-          console.error('execSubAgent: failed to update thread on completion: %O', error);
+          console.error('%s: failed to update thread on completion: %O', logScope, error);
         }
       },
     };
@@ -3160,6 +3189,7 @@ export class AiAgentService {
     threadId: string,
     startedAt: string,
     sourceMessageId: string,
+    logScope: 'execSubAgent' | 'execVirtualSubAgent',
   ): AgentHook[] {
     let accumulatedToolCalls = 0;
 
@@ -3186,7 +3216,7 @@ export class AiAgentService {
               },
             });
           } catch (error) {
-            log('Thread hook afterStep: failed to update metadata: %O', error);
+            log('%s: thread hook afterStep failed to update metadata: %O', logScope, error);
           }
         },
         id: 'thread-metadata-update',
@@ -3226,14 +3256,15 @@ export class AiAgentService {
 
           if (event.reason === 'error' && finalState.error) {
             console.error(
-              'Thread hook onComplete: task failed for thread %s:',
+              '%s: thread hook onComplete run failed for thread %s:',
+              logScope,
               threadId,
               finalState.error,
             );
           }
 
           try {
-            // Update task message with summary
+            // Update source message with summary
             const lastAssistantMessage = finalState.messages
               ?.slice()
               .reverse()
@@ -3263,13 +3294,14 @@ export class AiAgentService {
             });
 
             log(
-              'Thread hook onComplete: thread %s status=%s reason=%s',
+              '%s: thread hook onComplete thread %s status=%s reason=%s',
+              logScope,
               threadId,
               status,
               event.reason,
             );
           } catch (error) {
-            console.error('Thread hook onComplete: failed to update: %O', error);
+            console.error('%s: thread hook onComplete failed to update: %O', logScope, error);
           }
         },
         id: 'thread-completion',
