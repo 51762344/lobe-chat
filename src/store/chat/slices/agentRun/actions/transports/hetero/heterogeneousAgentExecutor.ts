@@ -20,11 +20,13 @@ import {
 import type {
   ChatMessageError,
   ChatToolPayload,
+  ChatTopicMetadata,
   ChatTopicStatus,
   ConversationContext,
   HeterogeneousProviderConfig,
   MessageMapScope,
   UIChatMessage,
+  WorkingDirConfig,
 } from '@lobechat/types';
 import {
   AgentRuntimeErrorType,
@@ -36,6 +38,10 @@ import { createNanoId } from '@lobechat/utils';
 import { t } from 'i18next';
 
 import { message as antdMessage } from '@/components/AntdStaticMethods';
+import {
+  removeHeteroSessionIdForWorkingDirectory,
+  setHeteroSessionIdForWorkingDirectory,
+} from '@/helpers/heteroSessionByWorkingDirectory';
 import { heterogeneousAgentService } from '@/services/electron/heterogeneousAgent';
 import { messageService } from '@/services/message';
 import { threadService } from '@/services/thread';
@@ -44,6 +50,7 @@ import {
   reconstructUploadFilesFromQueue,
 } from '@/store/chat/slices/operation/types';
 import { type ChatStore, useChatStore } from '@/store/chat/store';
+import { notifyDesktopHumanApprovalRequired } from '@/store/chat/utils/desktopNotification';
 import { messageMapKey } from '@/store/chat/utils/messageMapKey';
 
 import { buildRunLifecycle } from '../../lifecycle/buildRunLifecycle';
@@ -104,8 +111,7 @@ const maybeClassifyCliAuthRequiredError = (
 
 const shouldSuppressTerminalErrorEcho = (content: string, error: ChatMessageError): boolean => {
   const errorBody = error.body as
-    | (HeterogeneousAgentSessionError & { clearEchoedContent?: boolean })
-    | undefined;
+    (HeterogeneousAgentSessionError & { clearEchoedContent?: boolean }) | undefined;
   if (
     !errorBody?.clearEchoedContent &&
     errorBody?.code !== HeterogeneousAgentSessionErrorCode.AuthRequired
@@ -200,7 +206,20 @@ export interface HeterogeneousAgentExecutorParams {
   /** CC session ID from previous execution in this topic (for --resume) */
   resumeSessionId?: string;
   workingDirectory?: string;
+  workingDirectoryConfig?: WorkingDirConfig;
 }
+
+const getTopicMetadataById = (
+  store: ChatStore,
+  topicId: string | undefined,
+): ChatTopicMetadata | undefined => {
+  if (!topicId) return;
+
+  for (const topicData of Object.values(store.topicDataMap ?? {})) {
+    const topic = topicData?.items?.find((item) => item.id === topicId);
+    if (topic) return topic.metadata;
+  }
+};
 
 /**
  * Map heterogeneousProvider.command to adapter type key.
@@ -350,6 +369,7 @@ export const executeHeterogeneousAgent = async (
     operationId,
     resumeSessionId,
     workingDirectory,
+    workingDirectoryConfig,
   } = params;
 
   const adapterType = resolveAdapterType(heterogeneousProvider);
@@ -535,6 +555,17 @@ export const executeHeterogeneousAgent = async (
   const abortSignal = get().operations?.[operationId]?.abortController?.signal;
   const isAborted = () => !!abortSignal?.aborted;
   const updateTopicMetadata = get().updateTopicMetadata;
+  const getPersistedWorkingDirectoryConfig = (
+    topicMetadata: ChatTopicMetadata | undefined,
+  ): WorkingDirConfig | undefined =>
+    // Prefer the topic's CURRENT config: while the CLI runs, GitStatus may have
+    // persisted richer branch/PR/CI (`git.github`) onto it. Falling back to the
+    // run-start captured config would drop that enrichment on the completion
+    // write until a status component re-probes. Captured config is only the
+    // fallback for a topic that carries none yet.
+    topicMetadata?.workingDirectoryConfig ??
+    workingDirectoryConfig ??
+    (workingDirectory === undefined ? undefined : { path: workingDirectory });
   const hasStreamedState = () =>
     sawStreamedEvent ||
     !!mainState.accContent ||
@@ -545,9 +576,15 @@ export const executeHeterogeneousAgent = async (
   const clearStaleResumeMetadata = async () => {
     if (!context.topicId || !updateTopicMetadata) return;
 
+    const topicMetadata = getTopicMetadataById(get(), context.topicId);
     await updateTopicMetadata(context.topicId, {
       heteroSessionId: undefined,
+      heteroSessionIdByWorkingDirectory: removeHeteroSessionIdForWorkingDirectory(
+        topicMetadata,
+        workingDirectory,
+      ),
       workingDirectory: workingDirectory ?? '',
+      workingDirectoryConfig: getPersistedWorkingDirectoryConfig(topicMetadata),
     });
   };
   const writeTopicStatus = (status: ChatTopicStatus): void => {
@@ -1186,6 +1223,12 @@ export const executeHeterogeneousAgent = async (
             // so it's obvious from the topic list that this conversation is
             // blocked on the user, not still streaming.
             writeTopicStatus('waitingForHuman');
+            // Parity with the homogeneous approval paths (client / gateway /
+            // aiAgent): a CC AskUserQuestion now also bumps the dock badge and
+            // bounces the macOS dock. The helper is desktop-guarded and only
+            // requests attention while the window is hidden/unfocused, so it's
+            // a no-op when the user is already looking at the approval.
+            void notifyDesktopHumanApprovalRequired(get, context);
           } catch (err) {
             console.error('[HeterogeneousAgent] persist intervention pending failed:', err);
           }
@@ -1494,6 +1537,7 @@ export const executeHeterogeneousAgent = async (
       .getSessionInfo(agentSessionId)
       .catch(() => undefined);
     if (sessionInfo?.agentSessionId && context.topicId) {
+      const topicMetadata = getTopicMetadataById(get(), context.topicId);
       // Best-effort: a rejected
       // metadata save must NOT throw past the queue drain below — guarding the
       // await here keeps the resume-id persistence from blocking the follow-up
@@ -1501,7 +1545,13 @@ export const executeHeterogeneousAgent = async (
       // `resolveHeteroResume` reads the just-finished session id.
       await updateTopicMetadata?.(context.topicId, {
         heteroSessionId: sessionInfo.agentSessionId,
+        heteroSessionIdByWorkingDirectory: setHeteroSessionIdForWorkingDirectory(
+          topicMetadata,
+          workingDirectory,
+          sessionInfo.agentSessionId,
+        ),
         workingDirectory: workingDirectory ?? '',
+        workingDirectoryConfig: getPersistedWorkingDirectoryConfig(topicMetadata),
       }).catch((err) =>
         console.error('[HeterogeneousAgent] Failed to persist resume session id:', err),
       );

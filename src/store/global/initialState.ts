@@ -27,7 +27,6 @@ export enum ChatSettingsTabs {
   Plugin = 'plugin',
   Prompt = 'prompt',
   SelfIteration = 'selfIteration',
-  TTS = 'tts',
 }
 
 export enum GroupSettingsTabs {
@@ -37,6 +36,13 @@ export enum GroupSettingsTabs {
 }
 
 export type WorkingSidebarTab = 'files' | 'params' | 'resources' | 'review';
+
+export const DEFAULT_RESOURCE_MANAGER_COLUMN_WIDTHS = {
+  date: 160,
+  name: 574,
+  size: 140,
+  uploader: 180,
+};
 
 export enum SettingsTabs {
   About = 'about',
@@ -215,6 +221,7 @@ export interface SystemStatus {
     date: number;
     name: number;
     size: number;
+    uploader: number;
   };
   /**
    * Visibility of the Agent profile right-side Agent Builder panel.
@@ -245,6 +252,11 @@ export interface SystemStatus {
    * Independent from `showRightPanel` so toggling it does not affect other pages.
    */
   showTaskAgentPanel?: boolean;
+  /**
+   * Visibility of the Verify workspace left-side report-list panel.
+   * Independent from the nav rail so collapsing the report list does not affect other pages.
+   */
+  showVerifyReportPanel?: boolean;
   showVideoPanel?: boolean;
   showVideoTopicPanel?: boolean;
   /**
@@ -288,6 +300,10 @@ export interface SystemStatus {
    * number of topics to display per page
    */
   topicPageSize?: number;
+  /**
+   * Width of the Verify workspace left-side report-list panel.
+   */
+  verifyReportPanelWidth: number;
   videoPanelWidth: number;
   videoTopicPanelWidth?: number;
   videoTopicViewMode?: 'grid' | 'list';
@@ -398,7 +414,7 @@ export const INITIAL_STATUS = {
   imageTopicViewMode: 'grid' as const,
   imageTopicPanelWidth: 80,
   knowledgeBaseModalViewMode: 'list' as const,
-  leftPanelWidth: 320,
+  leftPanelWidth: 280,
   mobileShowTopic: false,
   modelDetailPanelExpandedKeys: [...DEFAULT_MODEL_DETAIL_PANEL_EXPANDED_KEYS],
   modelSwitchPanelGroupMode: 'byProvider',
@@ -408,11 +424,7 @@ export const INITIAL_STATUS = {
   pagePageSize: 20,
   portalWidth: 400,
   readNotificationSlugs: [],
-  resourceManagerColumnWidths: {
-    date: 160,
-    name: 574,
-    size: 140,
-  },
+  resourceManagerColumnWidths: DEFAULT_RESOURCE_MANAGER_COLUMN_WIDTHS,
   showCommandMenu: false,
   showFilePanel: true,
   showFleetPanel: true,
@@ -425,12 +437,14 @@ export const INITIAL_STATUS = {
   showRightPanel: false,
   showSystemRole: false,
   showTaskAgentPanel: false,
+  showVerifyReportPanel: true,
   showVideoPanel: true,
   showVideoTopicPanel: true,
   sidebarExpandedKeys: [...DEFAULT_HOME_SIDEBAR_EXPANDED_KEYS],
   systemRoleExpandedMap: {},
   tokenDisplayFormatShort: true,
   topicPageSize: 20,
+  verifyReportPanelWidth: 300,
   videoPanelWidth: 320,
   videoTopicViewMode: 'grid' as const,
   videoTopicPanelWidth: 80,
