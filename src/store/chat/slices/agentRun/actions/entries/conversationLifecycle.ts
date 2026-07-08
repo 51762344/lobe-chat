@@ -237,6 +237,7 @@ export class ConversationLifecycleActionImpl {
     metadata,
     onlyAddUserMessage,
     context,
+    contextSelections,
     messages: inputMessages,
     parentId: inputParentId,
     pageSelections,
@@ -291,6 +292,7 @@ export class ConversationLifecycleActionImpl {
       messages: inputMessages,
       parentId: inputParentId,
       pageSelections,
+      contextSelections,
     });
 
     // /compact — directly compress context without sending any message
@@ -382,9 +384,13 @@ export class ConversationLifecycleActionImpl {
       ? await materializeLocalSystemToolSnapshots(localFileReferences)
       : [];
     const userMessageMetadata =
-      metadata || pageSelections?.length || localSystemToolSnapshots.length
+      metadata ||
+      contextSelections?.length ||
+      pageSelections?.length ||
+      localSystemToolSnapshots.length
         ? {
             ...metadata,
+            ...(contextSelections?.length ? { contextSelections } : undefined),
             ...(pageSelections?.length ? { pageSelections } : undefined),
             ...(localSystemToolSnapshots.length ? { localSystemToolSnapshots } : undefined),
           }
@@ -451,7 +457,11 @@ export class ConversationLifecycleActionImpl {
     }
 
     if (onlyAddUserMessage) {
-      await this.#get().addUserMessage({ message, fileList: fileIdList });
+      await this.#get().addUserMessage({
+        message,
+        fileList: fileIdList,
+        metadata: userMessageMetadata,
+      });
 
       return;
     }
@@ -763,6 +773,7 @@ export class ConversationLifecycleActionImpl {
               editorData,
               files: fileIdList,
               metadata: userMessageMetadata,
+              contextSelections,
               pageSelections,
               parentId,
             },
@@ -791,10 +802,17 @@ export class ConversationLifecycleActionImpl {
         return;
       }
 
-      // Update context with server-created topicId
+      // Update context with server-created topicId. Once the server has returned a
+      // persisted topic, the hetero stream must target the real topic bucket; keeping
+      // `isNew` would route chunks to `main_<agent>_<topic>_new`.
+      const heteroTopicId = heteroData.topicId ?? operationContext.topicId;
+      const shouldResolveNewTopicKey = !!heteroTopicId && operationContext.scope !== 'thread';
       const heteroContext = {
         ...operationContext,
-        topicId: heteroData.topicId ?? operationContext.topicId,
+        // startOperation inherits from the parent op before merging this context.
+        // Use an explicit false so the child exec op does not inherit `isNew: true`.
+        ...(shouldResolveNewTopicKey ? { isNew: false } : {}),
+        topicId: heteroTopicId,
       };
       const heteroResponseMeta = heteroData as SendMessageServerResponseMeta;
       const heteroMessageKey = messageMapKey(heteroContext);
@@ -834,6 +852,12 @@ export class ConversationLifecycleActionImpl {
           clearNewKey: true,
           skipRefreshMessage: true,
         });
+        // resolveOptimisticTopic migrated the optimistic topic's loading owner
+        // onto the real id; it is released in the executor `finally` below —
+        // NOT here — because the persisted `status === 'running'` (the run
+        // spinner's other driver) is only written after startSession resolves,
+        // so releasing before the executor takes over would blank the sidebar
+        // spinner during a slow CLI startup.
       }
 
       // Clean up temp messages
@@ -868,9 +892,12 @@ export class ConversationLifecycleActionImpl {
       // branch returns early (line 498) and never reaches that clear.
       this.#get().updateOperationMetadata(operationId, { inputEditorTempState: null });
 
-      if (heteroData.topicId && !optimisticTopicResolved) {
-        this.#get().internal_updateTopicLoading(heteroData.topicId, true);
-      }
+      // Sidebar "running" spinner for hetero runs is driven off the persisted
+      // `topic.status === 'running'` (written by the executor's writeTopicStatus,
+      // and bucketed by resolveStatusBucket) — no separate client-only
+      // `topicLoadingIds` overlay, which used to desync: it cleared on the
+      // linear sendPrompt path (below) while `status` stayed 'running' when the
+      // executor's onComplete stalled, leaving the topic spinning after finish.
 
       // Start heterogeneous agent execution
       const { operationId: heteroOpId } = this.#get().startOperation({
@@ -890,6 +917,13 @@ export class ConversationLifecycleActionImpl {
         // may already be cleared by this point, so we read from DB instead)
         const userMsg = heteroData.messages.find((m: any) => m.id === heteroData.userMessageId);
         const persistedImageList = userMsg?.imageList;
+        const persistedMetadata = userMsg?.metadata as MessageMetadata | undefined;
+        const effectiveContextSelections = contextSelections?.length
+          ? contextSelections
+          : persistedMetadata?.contextSelections;
+        const effectivePageSelections = pageSelections?.length
+          ? pageSelections
+          : persistedMetadata?.pageSelections;
 
         // Read heterogeneous-agent session id from topic metadata for multi-turn
         // resume. `resolveHeteroResume` drops the sessionId when the saved cwd
@@ -909,10 +943,12 @@ export class ConversationLifecycleActionImpl {
         await executeHeterogeneousAgent(() => this.#get(), {
           assistantMessageId: heteroData.assistantMessageId,
           context: heteroContext,
+          contextSelections: effectiveContextSelections,
           heterogeneousProvider,
           imageList: persistedImageList?.length ? persistedImageList : undefined,
           message,
           operationId: heteroOpId,
+          pageSelections: effectivePageSelections,
           resumeSessionId,
           workingDirectory,
           workingDirectoryConfig,
@@ -923,9 +959,17 @@ export class ConversationLifecycleActionImpl {
           message: e instanceof Error ? e.message : 'Unknown error',
           type: 'HeterogeneousAgentError',
         });
+      } finally {
+        // Release the creation owner migrated by resolveOptimisticTopic (run
+        // end no longer clears topicLoadingIds since #16745, so without this
+        // the sidebar spinner sticks forever). Held until the run settles so
+        // the spinner stays continuous through the pre-`running` startup gap;
+        // it can't mask `waitingForHuman` — the sidebar item renders that
+        // state with higher priority than the running icon.
+        if (optimisticTopic && optimisticTopicResolved && heteroData.topicId) {
+          this.#get().internal_updateTopicLoading(heteroData.topicId, false);
+        }
       }
-
-      if (heteroData.topicId) this.#get().internal_updateTopicLoading(heteroData.topicId, false);
 
       return {
         assistantMessageId: heteroData.assistantMessageId,
@@ -980,6 +1024,19 @@ export class ConversationLifecycleActionImpl {
         // the new topic, so the shared hook reads the persisted conversation from
         // the store and titles it. Fire-and-forget.
         if (result.topicId) {
+          // executeGatewayAgent resolved the optimistic topic row via
+          // internal_replaceTopicId, which migrates its topicLoadingIds owner
+          // onto the real topic id. From here the run spinner is owned by the
+          // persisted `status === 'running'` (#16745 removed the transports'
+          // run-end topicLoadingIds clears), so release the migrated creation
+          // owner now — with no release left downstream, the sidebar spinner
+          // would stick forever after the run completes.
+          // No `optimisticTopicResolved = true` here: the gateway branch
+          // returns before the client-mode code that reads it.
+          if (optimisticTopic && optimisticTopicActive) {
+            this.#get().internal_updateTopicLoading(result.topicId, false);
+            optimisticTopicActive = false;
+          }
           void sendRunLifecycle
             .afterUserMessagePersisted({
               assistantMessageId: result.assistantMessageId,
@@ -1065,6 +1122,7 @@ export class ConversationLifecycleActionImpl {
             editorData,
             files: fileIdList,
             metadata: userMessageMetadata,
+            contextSelections,
             pageSelections,
             parentId,
           },

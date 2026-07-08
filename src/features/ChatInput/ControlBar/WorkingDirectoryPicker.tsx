@@ -2,7 +2,8 @@
 
 import { isDesktop } from '@lobechat/const';
 import type { WorkingDirEntry } from '@lobechat/types';
-import { getWorkingDirEffectivePath } from '@lobechat/types';
+import { getWorkingDirSourcePath } from '@lobechat/types';
+import { isRecord } from '@lobechat/utils';
 import { Flexbox, Icon, Input, Popover, Tooltip } from '@lobehub/ui';
 import { toast } from '@lobehub/ui/base-ui';
 import { createStaticStyles, cssVar, cx } from 'antd-style';
@@ -21,9 +22,13 @@ import { useTranslation } from 'react-i18next';
 
 import { openAddWorkingDirModal } from '@/features/WorkingDirectory';
 import {
-  resolveAgentWorkingDirectory,
+  resolveAgentWorkingDirectorySource,
   resolveTargetDeviceId,
 } from '@/helpers/agentWorkingDirectory';
+import {
+  getWorkingDirectoryName,
+  getWorkingDirectoryPathString,
+} from '@/helpers/workingDirectoryPath';
 import { deviceService } from '@/services/device';
 import { electronSystemService } from '@/services/electron/system';
 import { useAgentStore } from '@/store/agent';
@@ -209,7 +214,8 @@ const styles = createStaticStyles(({ css }) => ({
   `,
 }));
 
-const getDirName = (path: string) => path.split('/').findLast(Boolean) || path;
+const isValidWorkingDirEntry = (entry: unknown): entry is WorkingDirEntry =>
+  isRecord(entry) && !!getWorkingDirectoryPathString(entry.path);
 
 type FolderEntry = { path: string; repoType?: 'git' | 'github' };
 
@@ -317,19 +323,26 @@ const WorkingDirectoryPicker = memo<WorkingDirectoryPickerProps>(({ agentId }) =
   // The local machine's filesystem is browsable; a remote device's is not.
   const isLocalDevice = isDesktop && !!targetDeviceId && targetDeviceId === currentDeviceId;
 
-  const recents = useDeviceStore(deviceSelectors.getDeviceWorkingDirs(targetDeviceId));
-  const deviceDefaultCwd = useDeviceStore(deviceSelectors.getDeviceDefaultCwd(targetDeviceId));
-  const topicWorkingDirectory = useChatStore(topicSelectors.currentTopicWorkingDirectory);
+  const rawRecents = useDeviceStore(deviceSelectors.getDeviceWorkingDirs(targetDeviceId));
+  const recents = useMemo(() => rawRecents.filter(isValidWorkingDirEntry), [rawRecents]);
+  const rawDeviceDefaultCwd = useDeviceStore(deviceSelectors.getDeviceDefaultCwd(targetDeviceId));
+  const deviceDefaultCwd = getWorkingDirectoryPathString(rawDeviceDefaultCwd);
+  const rawTopicWorkingDirectory = useChatStore(topicSelectors.currentTopicWorkingDirectory);
+  const topicWorkingDirectory = getWorkingDirectoryPathString(rawTopicWorkingDirectory);
   const topicWorkingDirectoryConfig = useChatStore(
     (s) => topicSelectors.currentTopicMetadata(s)?.workingDirectoryConfig,
   );
-  const legacyAgentWorkingDirectory = useAgentStore(
+  const rawLegacyAgentWorkingDirectory = useAgentStore(
     (s) => s.localAgentWorkingDirectoryMap[agentId],
   );
+  const legacyAgentWorkingDirectory = getWorkingDirectoryPathString(rawLegacyAgentWorkingDirectory);
 
-  // The explicitly-selected cwd (no home fallback) — drives the active check and
-  // the Reset affordance.
-  const selectedDir = resolveAgentWorkingDirectory({
+  // The explicitly-selected REPO (no home fallback) — drives the directory label,
+  // the active check, and the Reset affordance. Resolves to the SOURCE path
+  // (repo root), never the active worktree: the label shows the repo the agent is
+  // bound to, while the worktree switcher in git status tracks the active
+  // worktree separately.
+  const resolvedSelectedDir = resolveAgentWorkingDirectorySource({
     agencyConfig,
     currentDeviceId,
     deviceDefaultCwd,
@@ -337,6 +350,7 @@ const WorkingDirectoryPicker = memo<WorkingDirectoryPickerProps>(({ agentId }) =
     topicWorkingDirectory,
     topicWorkingDirectoryConfig,
   });
+  const selectedDir = getWorkingDirectoryPathString(resolvedSelectedDir);
 
   // Reset only makes sense when an agent-level override exists. The device-wide
   // `deviceDefaultCwd` isn't clearable from here (it's the fallback itself), so
@@ -359,7 +373,7 @@ const WorkingDirectoryPicker = memo<WorkingDirectoryPickerProps>(({ agentId }) =
     if (!query) return recents;
     return recents.filter(
       (entry) =>
-        getDirName(entry.path).toLowerCase().includes(query) ||
+        getWorkingDirectoryName(entry.path)?.toLowerCase().includes(query) ||
         entry.path.toLowerCase().includes(query),
     );
   }, [recents, search]);
@@ -405,7 +419,9 @@ const WorkingDirectoryPicker = memo<WorkingDirectoryPickerProps>(({ agentId }) =
           variant: 'text',
         },
       ],
-      title: t('workingDirectory.removed', { name: getDirName(entry.path) }),
+      title: t('workingDirectory.removed', {
+        name: getWorkingDirectoryName(entry.path) ?? entry.path,
+      }),
     });
   };
 
@@ -415,9 +431,9 @@ const WorkingDirectoryPicker = memo<WorkingDirectoryPickerProps>(({ agentId }) =
   };
 
   const renderRow = (entry: WorkingDirEntry) => {
-    const effectivePath = getWorkingDirEffectivePath(entry);
-    const isActive = effectivePath === selectedDir;
-    const isDefault = !!deviceDefaultCwd && effectivePath === deviceDefaultCwd;
+    const sourcePath = getWorkingDirSourcePath(entry);
+    const isActive = sourcePath === selectedDir;
+    const isDefault = !!deviceDefaultCwd && sourcePath === deviceDefaultCwd;
     return (
       <Flexbox
         horizontal
@@ -431,7 +447,9 @@ const WorkingDirectoryPicker = memo<WorkingDirectoryPickerProps>(({ agentId }) =
         <DirIcon repoType={entry.repoType} />
         <Flexbox flex={1} style={{ minWidth: 0 }}>
           <Flexbox horizontal align={'center'} gap={6}>
-            <div className={styles.dirName}>{getDirName(entry.path)}</div>
+            <div className={styles.dirName}>
+              {getWorkingDirectoryName(entry.path) ?? entry.path}
+            </div>
             {isDefault && (
               <span className={styles.badge}>{t('workingDirectory.defaultBadge')}</span>
             )}
@@ -517,7 +535,9 @@ const WorkingDirectoryPicker = memo<WorkingDirectoryPickerProps>(({ agentId }) =
     </Flexbox>
   );
 
-  const displayName = selectedDir ? getDirName(selectedDir) : t('workingDirectory.notSet');
+  const displayName = selectedDir
+    ? (getWorkingDirectoryName(selectedDir) ?? selectedDir)
+    : t('workingDirectory.notSet');
 
   const trigger = (
     <div className={styles.button}>

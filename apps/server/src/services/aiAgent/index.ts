@@ -77,6 +77,7 @@ import {
   type ExecutionPlan,
   executionTargetToRuntimeMode,
   isDeviceCapablePlan,
+  isDeviceLockedPlan,
   resolveExecutionPlan,
 } from '@/helpers/executionTarget';
 import { shouldEnableBuiltinSkill } from '@/helpers/skillFilters';
@@ -130,7 +131,11 @@ import { MarketService } from '@/server/services/market';
 import { markdownToTxt } from '@/utils/markdownToTxt';
 
 import { resolveDeviceAccessPolicy } from './deviceAccessPolicy';
-import { buildAllowedBuiltinTools, isDeviceToolIdentifier } from './deviceToolRegistry';
+import {
+  buildAllowedBuiltinTools,
+  isDeviceToolIdentifier,
+  REMOTE_DEVICE_TOOL_IDENTIFIERS,
+} from './deviceToolRegistry';
 import { ingestAttachment } from './ingestAttachment';
 import { pruneRegeneratedBranch } from './pruneRegeneratedBranch';
 import {
@@ -2031,10 +2036,20 @@ export class AiAgentService {
           // `aiAgent` import. Only this cloud-CLI branch needs it.
           const { spawnHeteroSandbox } =
             await import('@/server/services/heterogeneousAgent/sandboxRunner');
+          // The sandbox authenticates its nested `lh` calls with this JWT. The
+          // narrow `hetero-operation` token (used for the device-dispatch path
+          // above) is rejected by `oidcAuth`, so CC capabilities that hit
+          // user-scoped endpoints — e.g. uploading a `Read`-on-image result to
+          // the file store for thumbnail echo — would 401 and silently drop.
+          // Mint a user-scoped `cli-sandbox` token instead (still `sub: userId`,
+          // ownership-gated on heteroIngest/heteroFinish) with a run-length TTL
+          // so it outlives a multi-hour run.
+          const sandboxJwt = await signUserJWT(this.userId, '4h');
           spawnHeteroSandbox({
             ...heteroParams,
             agentType: heteroType as 'claude-code' | 'codex',
             args: heteroExecArgs,
+            jwt: sandboxJwt,
             marketService: this.marketService,
           }).catch(async (err) => {
             // Fire-and-forget: execAgent has already returned `autoStarted`, and
@@ -2486,12 +2501,33 @@ export class AiAgentService {
       // device-capable session — `none` and `sandbox` sessions must never see
       // them, not even the proxy that could activate a device mid-run.
       const deviceCapable = isDeviceCapablePlan(executionPlan);
+      // Locked = routed to a device, or explicitly bound but offline. Such a
+      // run has no device decision left, so the remote-device picker is
+      // physically stripped below (and in the engine walls) — the model must
+      // follow the user's choice, never re-list or switch machines mid-run.
+      const deviceLocked = isDeviceLockedPlan(executionPlan);
       activeDeviceId = executionPlan.kind === 'device' ? executionPlan.deviceId : undefined;
       log(
         'execAgent: execution plan → kind=%s deviceId=%s',
         executionPlan.kind,
         activeDeviceId ?? 'none',
       );
+      // A device-targeted run that could not be routed silently degrades exec
+      // (lobe-skills runCommand/execScript) to the cloud sandbox. Surface it as
+      // a structured warn — `bound-device-offline` with a requestedDeviceId is
+      // the desktop "local device" pick whose gateway connection dropped, and
+      // this log is the breadcrumb for diagnosing WHY the device was judged
+      // offline (lazy WS connect vs getScopedOnlineDevices failing silently).
+      if (executionPlan.kind === 'device-unrouted') {
+        console.warn('[AiAgentService] device-unrouted: exec degrades to cloud sandbox', {
+          boundDeviceId,
+          onlineDeviceCount: onlineDevices.length,
+          reason: executionPlan.reason,
+          requestedDeviceId,
+          topicId,
+          userId: this.userId,
+        });
+      }
 
       // Resolve the operation's group context ONCE here and snapshot it into op
       // metadata below — the per-step context engine reads it back without a DB
@@ -2556,7 +2592,14 @@ export class AiAgentService {
         // lobe-agent drops `callSubAgent` so the model can't recurse into nested
         // sub-agents (which the runtime rejects, looping until the inactivity
         // watchdog kills the op). Mirrors the frontend `createAgentToolsEngine`.
+        // `executionEnv` mirrors the resolved plan so exec-capable tools
+        // (lobe-skills) can state where their commands actually run — most
+        // importantly the `device-unrouted` degradation, where the user picked
+        // a local device that is offline and exec silently lands in the sandbox.
         manifestContext: {
+          executionEnv: executionPlan.kind,
+          executionEnvUnroutedReason:
+            executionPlan.kind === 'device-unrouted' ? executionPlan.reason : undefined,
           isSubAgent: appContext?.isSubAgent,
           scope: appContext?.scope ?? undefined,
         },
@@ -2598,8 +2641,19 @@ export class AiAgentService {
       // activator-discovery map and let an external bot sender enable it
       // (). Centralising the check at the ingest layer means
       // every future manifest source automatically inherits the wall.
-      const isManifestIngestAllowed = (identifier: string): boolean =>
-        canUseDevice || !isDeviceToolIdentifier(identifier);
+      //
+      // A device-LOCKED run (routed, or explicitly bound but offline) keeps
+      // local-system but must not expose the remote-device picker: leaving it
+      // discoverable lets the activator's explicit activation bypass the rule
+      // gate and re-surface the device list mid-run — inviting redundant
+      // activateDevice calls or switching to a machine the user never chose.
+      // Enforced here (not as a point deletion after the seed) so the later
+      // Skill/Composio ingest loops cannot re-add the identifier.
+      const isManifestIngestAllowed = (identifier: string): boolean => {
+        if (!canUseDevice && isDeviceToolIdentifier(identifier)) return false;
+        if (deviceLocked && REMOTE_DEVICE_TOOL_IDENTIFIERS.has(identifier)) return false;
+        return true;
+      };
 
       // Start with the scoped manifest map (pluginIds + defaultToolIds)
       const manifestMap = toolsEngine.getEnabledPluginManifests(pluginIds);
@@ -2614,6 +2668,7 @@ export class AiAgentService {
       // internal infrastructure tools from being surfaced to the activator.
       const allowedBuiltinTools = buildAllowedBuiltinTools({
         canUseDevice,
+        deviceLocked,
         disableLocalSystem,
       });
       // Effective runtimeMode from the plan's resolved target — same value the
@@ -3217,7 +3272,10 @@ export class AiAgentService {
     if (resumeToolResult) {
       initialContext = {
         initialContext: initialContext.initialContext,
-        payload: { parentMessageId: resumeToolResult.parentMessageId } as any,
+        payload: {
+          assistantMessageId: assistantMessageRecord.id,
+          parentMessageId: resumeToolResult.parentMessageId,
+        } as any,
         phase: 'tool_result' as const,
         session: {
           messageCount: allMessages.length,

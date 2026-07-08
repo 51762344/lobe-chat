@@ -1,4 +1,4 @@
-import { getAgentPersistConfig } from '@lobechat/builtin-agents';
+import { BUILTIN_AGENT_SLUGS, getAgentPersistConfig } from '@lobechat/builtin-agents';
 import { INBOX_SESSION_ID } from '@lobechat/const';
 import type { AgentRankItem, LobeAgentAgencyConfig } from '@lobechat/types';
 import { pruneWorkingDirByDeviceDeletes } from '@lobechat/types';
@@ -23,6 +23,7 @@ import {
   files,
   knowledgeBases,
   messages,
+  sessionGroups,
   sessions,
   taskComments,
   taskDependencies,
@@ -36,6 +37,33 @@ import type { LobeChatDatabase } from '../type';
 import { genEndDateWhere, genRangeWhere, genStartDateWhere, genWhere } from '../utils/genWhere';
 import { normalizeInboxAgentMeta } from '../utils/inboxAgent';
 import { buildWorkspacePayload, buildWorkspaceWhere } from '../utils/workspace';
+
+/**
+ * Fields the Agent Builder's own row (`slug = BUILTIN_AGENT_SLUGS.agentBuilder`) must never
+ * carry. Its `persist` config only stores `model`/`provider`/`chatConfig` — title, avatar,
+ * systemRole, etc. are rendered from i18n / the static systemRoleTemplate at runtime, never
+ * from this row.
+ *
+ * Before PR #16420, `lobe-agent-management`'s self-management prompt could make the builder
+ * mistake an ambiguous "update this" request for editing itself instead of the target agent.
+ * Depending on caller (browser client tool executor vs. gateway server runtime in
+ * `apps/server/src/services/toolExecution/serverRuntimes/agentBuilder.ts`), these fields can
+ * arrive through *either* `AgentModel.update()` or `updateConfig()` — e.g. the gateway's
+ * `updatePrompt` writes `systemRole` via `update()`, while the browser client's meta editor
+ * writes `title`/`avatar`/etc. via `updateConfig()`. So both methods must strip the full list,
+ * not just the fields each historically happened to receive. Clients on builds older than
+ * PR #16420 can still hit this path, so enforce it here (the single write chokepoint)
+ * regardless of caller.
+ */
+const AGENT_BUILDER_PROTECTED_FIELDS = [
+  'title',
+  'description',
+  'avatar',
+  'backgroundColor',
+  'tags',
+  'marketIdentifier',
+  'systemRole',
+] as const;
 
 export class AgentModel {
   private userId: string;
@@ -484,7 +512,7 @@ export class AgentModel {
     //
     // The joined `knowledgeBases` / `files` rows also need a visibility guard
     // in the `leftJoin` ON clause: without it, a KB or file that was later
-    // flipped back to `private` via `setVisibility` (LOBE-11270) would keep
+    // flipped back to `private` via `setVisibility` would keep
     // leaking its name / description into every mounted-agent view across the
     // workspace. Enforcing the guard on the ON clause (rather than WHERE)
     // keeps the mount row in the result but nulls out the referenced entity —
@@ -733,21 +761,47 @@ export class AgentModel {
   };
 
   update = async (agentId: string, data: Partial<AgentItem>) => {
+    const sanitizedData = await this.stripAgentBuilderProtectedFields(agentId, data);
+
     return this.db
       .update(agents)
-      .set({ ...data, updatedAt: new Date() })
+      .set({ ...sanitizedData, updatedAt: new Date() })
       .where(and(eq(agents.id, agentId), this.ownership()));
   };
 
   /**
-   * Publish a private agent into the workspace. **One-way only** — once an
-   * agent has been shared with the workspace, other members may already be
-   * using it, so we never let it slip back to `private`. Likewise the
-   * `user_id = ?` + `visibility = 'private'` guards lock the operation to
-   * the creator's own still-private agent.
+   * Strip fields the Agent Builder's own row must never carry (see
+   * {@link AGENT_BUILDER_PROTECTED_FIELDS}). Only looks up the target row's `slug` when the
+   * incoming patch actually touches a protected field, so normal updates pay no extra query.
+   */
+  private stripAgentBuilderProtectedFields = async <T extends Record<string, any>>(
+    agentId: string,
+    data: T,
+    protectedFields: readonly string[] = AGENT_BUILDER_PROTECTED_FIELDS,
+  ): Promise<T> => {
+    if (!protectedFields.some((field) => field in data)) return data;
+
+    const agent = await this.db.query.agents.findFirst({
+      columns: { slug: true },
+      where: and(eq(agents.id, agentId), this.ownership()),
+    });
+
+    if (agent?.slug !== BUILTIN_AGENT_SLUGS.agentBuilder) return data;
+
+    const sanitized = { ...data };
+    for (const field of protectedFields) delete sanitized[field];
+    return sanitized;
+  };
+
+  /**
+   * Publish a private agent into the workspace. The `user_id = ?` +
+   * `visibility = 'private'` guards lock the operation to the creator's own
+   * still-private agent. The inverse transition (public → private) goes
+   * through {@link setVisibility}, which the router gates to the creator or
+   * a workspace owner (LOBE-11551).
    *
    * Use the existing `update` to change other fields; visibility is the only
-   * one with this asymmetric rule.
+   * one with these authorization rules.
    */
   publishToWorkspace = async (agentId: string) => {
     return this.db
@@ -761,6 +815,66 @@ export class AgentModel {
           eq(agents.visibility, 'private'),
         ),
       );
+  };
+
+  /**
+   * Lightweight lookup used to authorize visibility changes: the agent's
+   * creator, slug and current visibility, scoped by the ownership predicate
+   * (other members' private agents resolve to `null`).
+   */
+  getAgentVisibilityMeta = async (
+    id: string,
+  ): Promise<{ slug: string | null; userId: string; visibility: 'private' | 'public' } | null> => {
+    const rows = await this.db
+      .select({ slug: agents.slug, userId: agents.userId, visibility: agents.visibility })
+      .from(agents)
+      .where(and(eq(agents.id, id), this.ownership()))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      slug: row.slug,
+      userId: row.userId,
+      visibility: (row.visibility as 'private' | 'public' | null) ?? 'public',
+    };
+  };
+
+  /**
+   * Bidirectional visibility switch (LOBE-11551). Authorization (creator OR
+   * workspace owner, builtin agents excluded) is the router's responsibility —
+   * this method only applies the ownership-scoped write.
+   *
+   * Uses UPDATE … RETURNING instead of a follow-up SELECT: when a workspace
+   * owner demotes another member's agent to private, the post-update row no
+   * longer matches the visibility-aware ownership predicate, so a read-back
+   * would return 0 rows even though the write succeeded (same pattern as
+   * TaskModel.updateVisibility).
+   */
+  setVisibility = async (agentId: string, visibility: 'private' | 'public') => {
+    // A sidebar folder cannot mix visibilities (HomeRepository.processAgentList
+    // buckets grouped items by item visibility under same-visibility groups),
+    // so an agent crossing scopes while keyed to a group of the OLD scope
+    // would be emitted nowhere and vanish from the sidebar. Rehome it to the
+    // ungrouped section of its new scope when the group no longer matches.
+    const [current] = await this.db
+      .select({ groupVisibility: sessionGroups.visibility })
+      .from(agents)
+      .leftJoin(sessionGroups, eq(agents.sessionGroupId, sessionGroups.id))
+      .where(and(eq(agents.id, agentId), this.ownership()))
+      .limit(1);
+    const groupVisibility = current?.groupVisibility as 'private' | 'public' | null | undefined;
+    const clearGroup = groupVisibility != null && groupVisibility !== visibility;
+
+    const [updated] = await this.db
+      .update(agents)
+      .set({
+        updatedAt: new Date(),
+        visibility,
+        ...(clearGroup ? { sessionGroupId: null } : {}),
+      })
+      .where(and(eq(agents.id, agentId), this.ownership()))
+      .returning();
+    return updated ?? null;
   };
 
   touchUpdatedAt = async (agentId: string) => {
@@ -843,6 +957,13 @@ export class AgentModel {
     // Build data to be merged, excluding params (processed separately)
 
     const { params: _params, ...restData } = data;
+
+    // See AGENT_BUILDER_PROTECTED_FIELDS: some callers (e.g. the browser client's meta
+    // editor) route title/avatar/etc. through updateConfig() rather than update().
+    if (agent.slug === BUILTIN_AGENT_SLUGS.agentBuilder) {
+      for (const field of AGENT_BUILDER_PROTECTED_FIELDS) delete restData[field];
+    }
+
     const mergedValue = merge(agent, restData);
 
     // Apply the processed parameters

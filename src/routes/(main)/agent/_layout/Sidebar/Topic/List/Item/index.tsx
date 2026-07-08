@@ -8,6 +8,7 @@ import {
 import { Flexbox, Icon, Popover, Skeleton, Tag, Text, Tooltip } from '@lobehub/ui';
 import { createStaticStyles, cssVar, keyframes, useTheme } from 'antd-style';
 import { CheckCircle2, Hand, HashIcon, MessageSquareDashed, TriangleAlert } from 'lucide-react';
+import type { CSSProperties } from 'react';
 import { memo, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -19,6 +20,7 @@ import DirIcon from '@/features/ChatInput/ControlBar/DirIcon';
 import { useHasDraft } from '@/features/ChatInput/draftStorage';
 import NavItem from '@/features/NavPanel/components/NavItem';
 import { buildWorkspaceAwarePath } from '@/features/Workspace/workspaceAwarePath';
+import { getWorkingDirectoryName } from '@/helpers/workingDirectoryPath';
 import { getPlatformIcon } from '@/routes/(main)/agent/channel/const';
 import { useAgentStore } from '@/store/agent';
 import { agentSelectors } from '@/store/agent/selectors';
@@ -45,6 +47,19 @@ const rippleAnim = keyframes`
     opacity: 0;
   }
 `;
+
+// Base UI Popover plays an opacity/scale enter+exit transition driven by these
+// CSS vars on the positioner. Zero them so the meta hover card appears instantly
+// instead of easing in — the hover-intent delay (`mouseEnterDelay`) still gates
+// when it shows. `styles.root` maps to the positioner (inline style → wins over
+// the library's default without a specificity fight).
+const META_HOVER_CARD_STYLES = {
+  content: { padding: 12 },
+  root: {
+    '--lobe-popover-animation-duration': '0ms',
+    '--lobe-popover-animation-duration-exit': '0ms',
+  } as CSSProperties,
+};
 
 const styles = createStaticStyles(({ css }) => ({
   unreadWrapper: css`
@@ -106,20 +121,18 @@ const cancelPendingSingleClick = () => {
   }
 };
 
-// Last non-empty path segment — the folder name. Also yields the repo name for
-// a web github URL (".../owner/repo" → "repo").
-const getDirName = (path: string) => path.split('/').findLast(Boolean) || path;
-
 const getWorkingDirectoryDisplay = (metadata: ChatTopicMetadata | undefined) => {
   const config = metadata?.workingDirectoryConfig;
   const workingDirectory = getTopicMetadataWorkingDirectoryEffectivePath(metadata);
   if (!workingDirectory) return;
 
   const branch = config?.git?.branch;
-  const dirName = getDirName(workingDirectory);
+  const dirName = getWorkingDirectoryName(workingDirectory);
+  if (!dirName) return;
+
   const sourcePath = getTopicMetadataWorkingDirectorySourcePath(metadata);
   const sourceName =
-    sourcePath && sourcePath !== workingDirectory ? getDirName(sourcePath) : undefined;
+    sourcePath && sourcePath !== workingDirectory ? getWorkingDirectoryName(sourcePath) : undefined;
   const pathLabel = sourceName && sourceName !== dirName ? `${sourceName}/${dirName}` : dirName;
 
   return {
@@ -185,6 +198,7 @@ const TopicItem = memo<TopicItemProps>(
     // topic semantics, so skip the default `#` placeholder icon for their rows.
     const isHeterogeneousAgent = useAgentStore(agentSelectors.isCurrentAgentHeterogeneous);
     const addTab = useElectronStore((s) => s.addTab);
+    const prefetchMessages = useChatStore((s) => s.prefetchMessages);
 
     const loadingRingColor = isDarkMode
       ? cssVar.colorWarningBorder
@@ -275,8 +289,11 @@ const TopicItem = memo<TopicItemProps>(
     const isFailed = status === 'failed';
     const isRunning = status === 'running';
     const isWaitingForHuman = status === 'waitingForHuman';
-    const shouldShowRunningIcon =
-      isLoading || (isRunning && (!hasLocalRunningRuntime || isRuntimeVisiblyRunning));
+    // Post-visible-output tail: the user-visible answer is complete but the run
+    // is still doing terminal bookkeeping (unread persist, title summary) —
+    // #16518 intentionally masks the running icon during this window.
+    const isMaskedRunningTail = isRunning && hasLocalRunningRuntime && !isRuntimeVisiblyRunning;
+    const shouldShowRunningIcon = isLoading || (isRunning && !isMaskedRunningTail);
 
     // By-status grouping mixes topics from different projects, so surface each
     // topic's working directory as a muted second line. Data is already on the
@@ -293,13 +310,24 @@ const TopicItem = memo<TopicItemProps>(
         </Flexbox>
       ) : undefined;
 
-    const hasUnread = id && isUnreadCompleted;
+    // Surface the unread dot right away during the masked tail instead of a
+    // blank icon gap until markTopicUnread's persisted 'unread' lands. Skipped
+    // while the user is viewing the topic, like markTopicUnread's own guard.
+    const isRunningTailUnread = isMaskedRunningTail && !isTopicActive;
+
+    const hasUnread = id && (isUnreadCompleted || isRunningTailUnread);
     const unreadIcon = (
       <span className={styles.unreadWrapper}>
         <span className={styles.unreadRipple} />
         <span className={styles.unreadDot} />
       </span>
     );
+
+    useEffect(() => {
+      if (!activeAgentId || !id || !isUnreadCompleted || hasLocalRunningRuntime) return;
+
+      void prefetchMessages({ agentId: activeAgentId, scope: 'main', topicId: id });
+    }, [activeAgentId, hasLocalRunningRuntime, id, isUnreadCompleted, prefetchMessages]);
 
     // Surface a WeChat-style red "[Draft]" hint when this topic holds unsent
     // input. Drafts live in localStorage keyed by messageMapKey; the default
@@ -442,9 +470,9 @@ const TopicItem = memo<TopicItemProps>(
           <Popover
             arrow={false}
             content={<MetaHoverCard metadata={metadata} title={title} />}
-            mouseEnterDelay={0.4}
+            mouseEnterDelay={0.8}
             placement={'right'}
-            styles={{ content: { padding: 12 } }}
+            styles={META_HOVER_CARD_STYLES}
             trigger={'hover'}
           >
             <div>{navItem}</div>

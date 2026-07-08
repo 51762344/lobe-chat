@@ -22,9 +22,9 @@ export interface GitLinkedPullRequest {
 export type GitLinkedPullRequestLookupStatus = 'ok' | 'gh-missing' | 'error';
 
 export interface GitLinkedPullRequestResult {
-  /** Additional open PRs targeting the same head branch, beyond the primary one. */
+  /** Additional PRs targeting the same head branch, beyond the primary one. */
   extraCount?: number;
-  /** Null when no open PR is linked to the branch. */
+  /** Null when no PR is linked to the branch. */
   pullRequest: GitLinkedPullRequest | null;
   /** 'ok' — succeeded; 'gh-missing' — gh CLI unavailable / not authed; 'error' — other. */
   status: GitLinkedPullRequestLookupStatus;
@@ -206,6 +206,13 @@ export interface GitDeleteBranchResult {
 export interface GitRemoveWorktreeResult {
   error?: string;
   success: boolean;
+}
+
+export interface GitAddWorktreeResult {
+  error?: string;
+  success: boolean;
+  /** Absolute path of the created worktree, echoed back so the UI can switch to it. */
+  worktreePath?: string;
 }
 
 export interface GitPullResult {

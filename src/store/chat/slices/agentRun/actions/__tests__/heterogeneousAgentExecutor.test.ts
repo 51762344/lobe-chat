@@ -73,6 +73,10 @@ vi.mock('@/services/electron/heterogeneousAgent', () => ({
 // Gateway event handler — we spy on it but let it run (it calls getMessages)
 vi.mock('../transports/gateway/gatewayEventHandler', () => ({
   createGatewayEventHandler: vi.fn(() => vi.fn()),
+  // Faithful re-impl (the real one is unmocked to keep the import cycle out of
+  // this test): only 'interrupted' / 'waiting_for_async_tool' are non-clean.
+  isCompletedRuntimeEnd: (reason?: string | null) =>
+    reason !== 'interrupted' && reason !== 'waiting_for_async_tool',
 }));
 
 // isDesktop — defaults to `false` (matching the real test env / __ELECTRON__
@@ -908,6 +912,47 @@ describe('heterogeneousAgentExecutor DB persistence', () => {
       expect(contentWrite).toBeDefined();
     });
 
+    it('persists the resume session id from stream_start even when sendPrompt rejects (ratelimit regression)', async () => {
+      // Regression for tpc_k9pUn1yf151P: a rate-limit makes the CLI exit
+      // non-zero, so `sendPrompt` REJECTS and control jumps to `catch` —
+      // skipping the success-path metadata write. The session id used to be
+      // lost, so the next turn started a FRESH session and dropped ~41k of
+      // context. The stream_start early-write must land the resume token before
+      // the rejection, regardless of how the run ends.
+      const store = createMockStore();
+      const get = vi.fn(() => store);
+
+      // sendPrompt rejects (non-zero CLI exit) — drives the catch-block path,
+      // so the success-path getSessionInfo write never runs.
+      let rejectSendPrompt!: (e: unknown) => void;
+      mockSendPrompt.mockReturnValue(
+        new Promise<void>((_, rej) => {
+          rejectSendPrompt = rej;
+        }),
+      );
+
+      const executorPromise = executeHeterogeneousAgent(get, defaultParams);
+      await flush();
+
+      // CC reports its session id via system:init → stream_start (the early
+      // resume-token write fires here), streams a little, then the run fails.
+      ipc.emitRawLine('ipc-sess-1', ccInit('cc-sess-ratelimit'));
+      ipc.emitRawLine('ipc-sess-1', ccText('msg_01', 'partial content'));
+      await flush();
+
+      // Reject sendPrompt → catch block (success path skipped entirely).
+      rejectSendPrompt(new Error('rate limit exceeded'));
+      await executorPromise.catch(() => {});
+      await flush();
+
+      // The resume token was persisted at stream_start, BEFORE the catch block
+      // ran — so the next turn resumes this session instead of starting fresh.
+      expect(store.updateTopicMetadata).toHaveBeenCalledWith(
+        'topic-1',
+        expect.objectContaining({ heteroSessionId: 'cc-sess-ratelimit' }),
+      );
+    });
+
     it('should not persist streamed auth error echoes as assistant content when the session errors', async () => {
       const rawAuthError =
         'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid authentication credentials"}}';
@@ -1225,6 +1270,36 @@ describe('heterogeneousAgentExecutor DB persistence', () => {
       });
 
       expect(mockSendPrompt).toHaveBeenCalledWith('ipc-sess-1', 'test prompt', 'op-1', imageList);
+    });
+
+    it('should forward context selections as heterogeneous system context', async () => {
+      const store = createMockStore();
+      const get = vi.fn(() => store);
+      setupIpcCapture();
+
+      await executeHeterogeneousAgent(get, {
+        ...defaultParams,
+        contextSelections: [
+          {
+            content: 'const answer = 42;',
+            filePath: 'src/example.ts',
+            id: 'selection-1',
+            lineRange: { endLine: 7, startLine: 7 },
+            source: 'code',
+          },
+        ],
+      });
+
+      expect(mockSendPrompt).toHaveBeenCalledWith(
+        'ipc-sess-1',
+        'test prompt',
+        'op-1',
+        undefined,
+        expect.stringContaining('<user_context_selections count="1">'),
+      );
+      expect(mockSendPrompt.mock.calls[0][4]).toContain('filePath="src/example.ts"');
+      expect(mockSendPrompt.mock.calls[0][4]).toContain('lines="7-7"');
+      expect(mockSendPrompt.mock.calls[0][4]).toContain('const answer = 42;');
     });
 
     it('should pass Claude Code model and thinking effort as spawn args', async () => {
@@ -3959,7 +4034,7 @@ describe('heterogeneousAgentExecutor DB persistence', () => {
           // body = markdownToTxt(finalContent)
           body: expect.stringContaining('All done with the task'),
           // navigate path resolved from agentId + topicId
-          navigate: { path: expect.any(String) },
+          navigate: expect.objectContaining({ escape: true, path: expect.any(String) }),
           title: expect.any(String),
         }),
       );
@@ -4184,6 +4259,58 @@ describe('heterogeneousAgentExecutor DB persistence', () => {
           topicId: 'topic-1',
         }),
       );
+    });
+
+    // ── 5. stuck-spinner regression: status reset must not wait on the drain ──
+    it('resets topic status even when the persist queue never drains', async () => {
+      // A DB write that never settles — mirrors a dropped desktop-IPC reply. It
+      // strands the executor's persistQueue, which onComplete used to `await`
+      // unbounded BEFORE resetting topic status, leaving the sidebar spinning
+      // forever after the CLI had already exited (the bug this guards against).
+      let releaseWrite!: () => void;
+      const hangingWrite = new Promise<void>((r) => {
+        releaseWrite = r;
+      });
+      mockUpdateMessage.mockReturnValue(hangingWrite);
+
+      const updateTopicStatus = vi.fn();
+      const store = createMockStore({
+        activeTopicId: 'topic-1', // viewing → a clean end writes 'active'
+        updateTopicStatus,
+      });
+      const get = vi.fn(() => store);
+
+      let resolveSendPrompt!: () => void;
+      mockSendPrompt.mockReturnValue(
+        new Promise<void>((r) => {
+          resolveSendPrompt = r;
+        }),
+      );
+
+      const executorPromise = executeHeterogeneousAgent(get, defaultParams);
+      await flush();
+
+      // A tool batch enqueues an awaited `updateMessage` onto persistQueue — the
+      // hanging write above stalls the queue before the terminal drain.
+      ipc.emitRawLine('ipc-sess-1', ccInit());
+      ipc.emitRawLine('ipc-sess-1', ccToolUse('msg_01', 'toolu_1', 'Read', { file_path: '/a' }));
+      ipc.emitRawLine('ipc-sess-1', ccToolResult('toolu_1', 'file content'));
+      ipc.emitRawLine('ipc-sess-1', ccResult());
+      ipc.emitComplete('ipc-sess-1');
+      await flush();
+
+      // The fix: status is reset synchronously at the top of onComplete, BEFORE
+      // the (now stalled + bounded) drain — so the spinner clears to 'active'
+      // even though the persist queue is still pending on the hanging write.
+      expect(updateTopicStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'active', topicId: 'topic-1' }),
+      );
+
+      // Release so the queue drains and the executor settles cleanly.
+      releaseWrite();
+      resolveSendPrompt();
+      await executorPromise;
+      await flush();
     });
   });
 });

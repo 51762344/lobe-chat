@@ -20,6 +20,10 @@ export default {
   'workingDirectory.clean': 'clean',
   'workingDirectory.createBranchAction': 'Checkout new branch…',
   'workingDirectory.createBranchTitle': 'Create new branch',
+  'workingDirectory.createWorktreeAction': 'Create worktree…',
+  'workingDirectory.createWorktreeFailed': 'Create worktree failed',
+  'workingDirectory.createWorktreeSubmit': 'Create',
+  'workingDirectory.createWorktreeTitle': 'Create new worktree',
   'workingDirectory.current': 'Current working directory',
   'workingDirectory.defaultBadge': 'Default',
   'workingDirectory.deleteBranchAction': 'Delete branch',
@@ -30,6 +34,8 @@ export default {
   'workingDirectory.detachedHead': 'Detached HEAD at {{sha}}',
   'workingDirectory.diffStatTooltip':
     'Added {{added}} · Modified {{modified}} · Deleted {{deleted}}',
+  'workingDirectory.diffLineStatTooltip':
+    'Added lines {{added}} · Deleted lines {{deleted}} · Changed files {{files}}',
   'workingDirectory.filesAdded': 'Added',
   'workingDirectory.filesDeleted': 'Deleted',
   'workingDirectory.filesEmpty': 'No uncommitted changes',
@@ -38,6 +44,7 @@ export default {
   'workingDirectory.ghMissing':
     'Install and log in to the GitHub CLI (`gh`) to see linked pull requests',
   'workingDirectory.newBranchPlaceholder': 'feature/new-branch-name',
+  'workingDirectory.newWorktreeLocation': 'Will be created at {{path}}',
   'workingDirectory.noMatch': 'No matching directories',
   'workingDirectory.noRecent': 'No directories yet',
   'workingDirectory.notSet': 'Click to set working directory',
@@ -83,6 +90,7 @@ export default {
   'workingDirectory.removeWorktreeConfirm':
     'Delete worktree “{{name}}”? This removes the worktree directory but keeps its branch. Git will refuse if it has uncommitted changes.',
   'workingDirectory.removeWorktreeFailed': 'Delete worktree failed',
+  'workingDirectory.removeWorktreePending': 'Deleting worktree “{{name}}”…',
   'workingDirectory.removeWorktreeSuccess': 'Worktree deleted',
   'workingDirectory.removeWorktreeTitle': 'Delete worktree',
   'workingDirectory.worktreeSearchPlaceholder': 'Search worktrees',

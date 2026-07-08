@@ -1,5 +1,6 @@
 import { REMOTE_HETEROGENEOUS_AGENT_CONFIGS } from '@lobechat/heterogeneous-agents';
 import type { DeviceChannel, DeviceListItem, DeviceScope, WorkingDirEntry } from '@lobechat/types';
+import { deriveWorktreePath } from '@lobechat/types';
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 
@@ -147,12 +148,20 @@ export const deviceRouter = router({
     }),
 
   gitLinkedPullRequest: deviceProcedure
-    .input(z.object({ branch: z.string(), deviceId: z.string(), path: z.string() }))
+    .input(
+      z.object({
+        branch: z.string(),
+        deviceId: z.string(),
+        path: z.string(),
+        pullRequestNumber: z.number().optional(),
+      }),
+    )
     .query(async ({ ctx, input }) => {
       const result = await deviceGateway.gitLinkedPullRequest({
         branch: input.branch,
         deviceId: input.deviceId,
         path: input.path,
+        pullRequestNumber: input.pullRequestNumber,
         userId: ctx.userId,
         workspaceId: ctx.workspaceId,
       });
@@ -309,7 +318,36 @@ export const deviceRouter = router({
         deviceId: input.deviceId,
         path: input.path,
         userId: ctx.userId,
+        workspaceId: ctx.workspaceId,
         worktreePath: input.worktreePath,
+      }),
+    ),
+
+  /**
+   * Add a linked worktree on a fresh branch in a directory's repository on a
+   * remote device, via the device's `addGitWorktree` RPC.
+   *
+   * The target directory is derived here from the trusted `path` + `branch`
+   * (a `<repo>-<branch>` sibling) rather than accepted from the request, so a
+   * crafted web call can't ask the device to check out at an arbitrary absolute
+   * path — the branch is folded to `-` in the folder name, so it can't traverse.
+   */
+  addGitWorktree: deviceProcedure
+    .input(
+      z.object({
+        branch: z.string(),
+        deviceId: z.string(),
+        path: z.string(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) =>
+      deviceGateway.addGitWorktree({
+        branch: input.branch,
+        deviceId: input.deviceId,
+        path: input.path,
+        userId: ctx.userId,
+        workspaceId: ctx.workspaceId,
+        worktreePath: deriveWorktreePath(input.path, input.branch),
       }),
     ),
 
@@ -735,7 +773,13 @@ export const deviceRouter = router({
           platform: d.platform ?? live?.platform ?? null,
           registered: true,
           scope,
-          workingDirs: d.workingDirs ?? [],
+          // Strip the heavy `workspace` scan (AGENTS.md + project skills, up to
+          // ~30KB per dir) from the list payload. It's a server-owned cache for
+          // the agent runtime (restored from the DB row on run start, never from
+          // this response) and no client UI renders it from the list — skills are
+          // re-derived live via `device.listProjectSkills`. Keep `workspaceScannedAt`
+          // (a cheap number) so clients can still show scan freshness.
+          workingDirs: (d.workingDirs ?? []).map(({ workspace: _workspace, ...rest }) => rest),
         };
       });
 
