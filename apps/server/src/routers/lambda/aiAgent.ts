@@ -1,11 +1,12 @@
 import { type AgentStreamEvent } from '@lobechat/agent-gateway-client';
 import { parse } from '@lobechat/conversation-flow';
-import { type TaskCurrentActivity, type TaskStatusResult } from '@lobechat/types';
+import type { TaskCurrentActivity, TaskStatusResult } from '@lobechat/types';
 import {
   RequestTrigger,
   ThreadStatus,
   ThreadType,
   UserInterventionConfigSchema,
+  workingDirConfigSchema,
 } from '@lobechat/types';
 import { TRPCError } from '@trpc/server';
 import debug from 'debug';
@@ -28,8 +29,6 @@ import { AiAgentService } from '@/server/services/aiAgent';
 import { AiChatService } from '@/server/services/aiChat';
 import { getFileProxyUrl } from '@/server/services/file';
 import { HeterogeneousAgentService } from '@/server/services/heterogeneousAgent';
-
-import { workingDirConfigSchema } from './workingDirSchema';
 
 const log = debug('lobe-server:ai-agent-router');
 
@@ -209,7 +208,7 @@ const ExecAgentSchema = z
         /** ID of the pending `role='tool'` message this result targets. */
         parentMessageId: z.string(),
         /** Optional plugin state to persist on the tool message. */
-        pluginState: z.record(z.unknown()).optional(),
+        pluginState: z.record(z.string(), z.unknown()).optional(),
         /** tool_call_id of the pending tool call being answered. */
         toolCallId: z.string(),
       })

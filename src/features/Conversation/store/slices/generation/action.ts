@@ -1,5 +1,5 @@
 import { AgentManagementIdentifier } from '@lobechat/builtin-tool-agent-management';
-import { LOADING_FLAT } from '@lobechat/const';
+import { HETERO_CONTINUE_PROMPT, LOADING_FLAT } from '@lobechat/const';
 import type {
   ChatImageItem,
   ConversationContext,
@@ -10,6 +10,7 @@ import { type StateCreator } from 'zustand';
 
 import { message as antdMessage } from '@/components/AntdStaticMethods';
 import { MESSAGE_CANCEL_FLAT } from '@/const/index';
+import { isHeterogeneousAgentStatusGuideError } from '@/features/Conversation/Error/heterogeneous';
 import { messageService } from '@/services/message';
 import { getAgentStoreState } from '@/store/agent';
 import { agentByIdSelectors, agentSelectors } from '@/store/agent/selectors';
@@ -85,13 +86,53 @@ const settleGenerationEntry = (
 };
 
 /**
- * Branch a hetero (Claude Code / Codex) turn off an existing user message.
+ * Prompt that resumes an interrupted hetero run instead of restarting it.
  *
- * Used by regenerate (parent = user msg, prompt = original user content).
- * Pre-creates the assistant row so `executeHeterogeneousAgent` has a stable
- * `assistantMessageId` to stream into, then runs an `execHeterogeneousAgent`
- * op as a child of the caller's parent op so Stop cancels the executor
- * without killing the parent op early.
+ * Neither CLI exposes a "keep going, no new input" primitive — `claude --resume`
+ * and `codex exec resume` both require a prompt — so continuing necessarily adds
+ * one user turn to the CLI's own transcript. That transcript already holds every
+ * completed step (we resume the same session id), so the instruction only has to
+ * stop the model from redoing them. Not localized: it is model input, not UI.
+ */
+/**
+ * Where a hetero (Claude Code / Codex) run should execute, and whether it can
+ * pick up the topic's existing CLI session.
+ *
+ * `workingDirectory`: the topic-level pin (set when bound to a project) wins
+ * over the agent-level default, so regenerate/continue stay on the same project
+ * as the original turn.
+ */
+const resolveHeteroRunContext = (
+  chatStore: ReturnType<typeof useChatStore.getState>,
+  context: ConversationContext,
+  agentId: string,
+) => {
+  const topic = context.topicId
+    ? topicSelectors.getTopicById(context.topicId)(chatStore)
+    : undefined;
+  const currentDeviceId = getElectronStoreState().gatewayDeviceInfo?.deviceId;
+  const agentWorkingDirectory = agentByIdSelectors.getAgentWorkingDirectoryById(
+    agentId,
+    currentDeviceId,
+  )(getAgentStoreState());
+  const workingDirectory = topic?.metadata?.workingDirectory || agentWorkingDirectory;
+
+  // Drops the saved sessionId when its bound cwd disagrees with the current
+  // one — without this CC emits "No conversation found with session ID".
+  const { cwdChanged, resumeSessionId } = resolveHeteroResume(topic?.metadata, workingDirectory);
+
+  return { cwdChanged, resumeSessionId, workingDirectory };
+};
+
+/**
+ * Branch a hetero (Claude Code / Codex) turn off an existing message.
+ *
+ * Used by regenerate (parent = user msg, prompt = original user content) and by
+ * continue-after-error (parent = the run's chain tail, prompt = a continuation
+ * instruction). Pre-creates the assistant row so `executeHeterogeneousAgent` has
+ * a stable `assistantMessageId` to stream into, then runs an
+ * `execHeterogeneousAgent` op as a child of the caller's parent op so Stop
+ * cancels the executor without killing the parent op early.
  */
 const runHeterogeneousFromExistingMessage = async (
   chatStore: ReturnType<typeof useChatStore.getState>,
@@ -110,22 +151,11 @@ const runHeterogeneousFromExistingMessage = async (
   const agentId = context.agentId;
   if (!agentId) throw new Error('agentId is required for heterogeneous agent');
 
-  // Resolve workingDirectory: topic-level pin (set when bound to a project)
-  // wins over the agent-level default. Mirrors the sendMessage hetero branch
-  // so regenerate stays on the same project as the original turn.
-  const topic = context.topicId
-    ? topicSelectors.getTopicById(context.topicId)(chatStore)
-    : undefined;
-  const currentDeviceId = getElectronStoreState().gatewayDeviceInfo?.deviceId;
-  const agentWorkingDirectory = agentByIdSelectors.getAgentWorkingDirectoryById(
+  const { cwdChanged, resumeSessionId, workingDirectory } = resolveHeteroRunContext(
+    chatStore,
+    context,
     agentId,
-    currentDeviceId,
-  )(getAgentStoreState());
-  const workingDirectory = topic?.metadata?.workingDirectory || agentWorkingDirectory;
-
-  // Drops the saved sessionId when its bound cwd disagrees with the current
-  // one — without this CC emits "No conversation found with session ID".
-  const { cwdChanged, resumeSessionId } = resolveHeteroResume(topic?.metadata, workingDirectory);
+  );
   if (cwdChanged) antdMessage.info(t('heteroAgent.resumeReset.cwdChanged', { ns: 'chat' }));
 
   const assistantMsg = await messageService.createMessage({
@@ -176,12 +206,21 @@ const runHeterogeneousFromExistingMessage = async (
   return assistantMsg.id;
 };
 
+export interface HeteroContinuationScheduleParams {
+  failedAssistantMessageId: string;
+  rateLimit?: {
+    rateLimitType?: string;
+    resetsAt?: number;
+  };
+}
+
 /**
  * Generation Actions
  *
  * Handles generation control (stop, cancel, regenerate, continue)
  */
 export interface GenerationAction {
+  cancelHeteroContinuation: () => Promise<void>;
   /**
    * Cancel a specific operation
    */
@@ -213,6 +252,16 @@ export interface GenerationAction {
    * Continue generation from a specific block
    */
   continueGenerationMessage: (displayMessageId: string, messageId: string) => Promise<void>;
+
+  /**
+   * Resume a heterogeneous (CC / Codex) run whose LAST step died on a status
+   * error (rate limit, upstream overload, ...), keeping every step that
+   * succeeded before it. Falls back to `delAndRegenerateMessage` when there is
+   * nothing to keep or no CLI session left to resume.
+   *
+   * @param groupMessageId - the assistantGroup id of the failed run
+   */
+  continueHeteroAfterError: (groupMessageId: string) => Promise<void>;
 
   /**
    * Delete and regenerate a message
@@ -289,6 +338,8 @@ export interface GenerationAction {
    */
   resetHeteroOverloadRetry: (scopeId: string) => void;
 
+  scheduleHeteroContinuation: (params: HeteroContinuationScheduleParams) => Promise<void>;
+
   /**
    * Stop current generation
    */
@@ -316,6 +367,14 @@ export const generationSlice: StateCreator<
   [],
   GenerationAction
 > = (set, get) => ({
+  cancelHeteroContinuation: async () => {
+    const topicId = get().context.topicId;
+    if (!topicId) return;
+
+    const chatStore = useChatStore.getState();
+    await chatStore.updateTopicStatus({ status: 'failed', topicId });
+    await chatStore.updateTopicMetadata(topicId, { scheduledRun: null });
+  },
   cancelOperation: (operationId: string, reason?: string) => {
     const state = get();
     const { hooks } = state;
@@ -442,6 +501,139 @@ export const generationSlice: StateCreator<
       });
       throw error;
     }
+  },
+
+  continueHeteroAfterError: async (groupMessageId: string) => {
+    const { context, dbMessages, displayMessages, hooks } = get();
+    const chatStore = useChatStore.getState();
+
+    const group = displayMessages.find((m) => m.id === groupMessageId);
+    const erroredStep = group?.children?.at(-1);
+    if (!erroredStep) return;
+
+    // Only the dedicated hetero status errors (rate limit, upstream overload,
+    // auth, missing CLI) mean "the run died but its session survives". A generic
+    // tool/provider error on a grouped reply is not resumable this way.
+    if (!isHeterogeneousAgentStatusGuideError(erroredStep.error?.body)) return;
+
+    const agentConfig = agentSelectors.getAgentConfigById(context.agentId)(getAgentStoreState());
+    const heterogeneousProvider = agentConfig?.agencyConfig?.heterogeneousProvider;
+    const runtimeType = selectRuntimeType({
+      boundDeviceId: agentConfig?.agencyConfig?.boundDeviceId,
+      executionTarget: agentConfig?.agencyConfig?.executionTarget,
+      heterogeneousProvider,
+      isGatewayMode: chatStore.isGatewayModeEnabled(context.agentId),
+      // Workspace agents never run in-process on this member's desktop — a
+      // local/unset target coerces to sandbox/device. Omitting this would
+      // classify the retry as local hetero and spawn the CLI on the wrong
+      // machine; with it, gateway-routed runs take the whole-turn fallback.
+      isWorkspaceAgent: agentByIdSelectors.isWorkspaceAgentById(context.agentId)(
+        getAgentStoreState(),
+      ),
+    });
+    const agentId = context.agentId;
+
+    const resumeSessionId = agentId
+      ? resolveHeteroRunContext(chatStore, context, agentId).resumeSessionId
+      : undefined;
+
+    // Nothing to continue from: the failed step IS the group's head (the run
+    // died before producing a second step, so no work was preserved anyway), or
+    // the topic has no CLI session left to resume (never started, or its cwd
+    // moved). Both degrade to replacing the whole turn.
+    const hasEarlierSteps = erroredStep.id !== groupMessageId;
+    if (
+      runtimeType !== 'hetero' ||
+      !heterogeneousProvider ||
+      !hasEarlierSteps ||
+      !resumeSessionId
+    ) {
+      await get().delAndRegenerateMessage(groupMessageId);
+      return;
+    }
+
+    // A step that streamed content or landed tool calls before dying is worth
+    // keeping: clear its error and chain the continuation onto it. A step that
+    // carries nothing but the error (its content echo was suppressed) would
+    // render as an empty block, so drop it and chain onto its parent instead.
+    const hasSalvageableWork =
+      !!erroredStep.tools?.length ||
+      (!!erroredStep.content && erroredStep.content !== LOADING_FLAT);
+
+    const continueParentId = hasSalvageableWork
+      ? erroredStep.id
+      : dbMessages.find((m) => m.id === erroredStep.id)?.parentId;
+    if (!continueParentId) {
+      await get().delAndRegenerateMessage(groupMessageId);
+      return;
+    }
+
+    const { operationId } = chatStore.startOperation({
+      context: { ...context, messageId: groupMessageId },
+      type: 'regenerate',
+    });
+
+    try {
+      if (hasSalvageableWork) await get().updateMessageError(erroredStep.id, null);
+      else await get().deleteAssistantMessage(erroredStep.id);
+
+      // Chaining off the run's tail (not off the user message) keeps the new
+      // steps inside the same assistantGroup, so the bubble grows instead of
+      // being replaced.
+      await runHeterogeneousFromExistingMessage(chatStore, {
+        context,
+        heterogeneousProvider,
+        parentMessageId: continueParentId,
+        parentOperationId: operationId,
+        prompt: HETERO_CONTINUE_PROMPT,
+      });
+
+      settleGenerationEntry(chatStore, operationId, () =>
+        hooks.onRegenerateComplete?.(groupMessageId),
+      );
+    } catch (error) {
+      // Settle the wrapper op on failure — see delAndRegenerateMessage.
+      chatStore.failOperation(operationId, {
+        message: error instanceof Error ? error.message : String(error),
+        type: 'RegenerateError',
+      });
+      throw error;
+    }
+  },
+
+  scheduleHeteroContinuation: async ({ failedAssistantMessageId, rateLimit }) => {
+    const { context, dbMessages } = get();
+    const topicId = context.topicId;
+    if (!topicId) return;
+
+    const messagesById = new Map(dbMessages.map((message) => [message.id, message]));
+    let ancestor = messagesById.get(failedAssistantMessageId);
+    while (ancestor?.parentId && ancestor.role !== 'user') {
+      ancestor = messagesById.get(ancestor.parentId);
+    }
+    const userMessageId = ancestor?.role === 'user' ? ancestor.id : undefined;
+    if (!userMessageId) return;
+
+    const chatStore = useChatStore.getState();
+    const topic = topicSelectors.getTopicById(topicId)(chatStore);
+    const now = new Date().toISOString();
+
+    await chatStore.updateTopicMetadata(topicId, {
+      scheduledRun: {
+        createdAt: now,
+        failedAssistantMessageId,
+        rateLimit,
+        reason: 'rate_limit',
+        resume: {
+          sessionId: topic?.metadata?.heteroSessionId,
+          workingDirectory: topic?.metadata?.workingDirectory,
+        },
+        source: 'heterogeneous_agent',
+        updatedAt: now,
+        userMessageId,
+      },
+    });
+    await chatStore.updateTopicStatus({ status: 'scheduled', topicId });
   },
 
   delAndRegenerateMessage: async (messageId: string) => {

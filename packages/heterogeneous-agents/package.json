@@ -6,10 +6,12 @@
   "exports": {
     ".": "./src/index.ts",
     "./askUser": "./src/askUser/index.ts",
+    "./builtinMcp": "./src/builtinMcp/index.ts",
     "./client": "./src/client/index.ts",
     "./protocol": "./src/protocol/index.ts",
     "./resolveCliCommand": "./src/spawn/resolveCliCommand.ts",
-    "./spawn": "./src/spawn/index.ts"
+    "./spawn": "./src/spawn/index.ts",
+    "./transcript": "./src/transcript/index.ts"
   },
   "main": "./src/index.ts",
   "scripts": {
@@ -23,7 +25,7 @@
     "@lobehub/icons": "^5.10.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "diff": "^8.0.4",
-    "zod": "^4.0.0"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@lobechat/types": "workspace:*"
