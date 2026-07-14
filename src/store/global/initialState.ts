@@ -37,7 +37,9 @@ export enum GroupSettingsTabs {
   Settings = 'settings',
 }
 
-export type WorkingSidebarTab = 'browser' | 'files' | 'params' | 'resources' | 'review';
+// business builds may register extra sidebar tabs, so any string key is accepted
+export type WorkingSidebarTab =
+  'browser' | 'files' | 'params' | 'resources' | 'review' | (string & {});
 
 export const DEFAULT_RESOURCE_MANAGER_COLUMN_WIDTHS = {
   date: 160,
@@ -333,6 +335,11 @@ export interface SystemStatus {
    */
   workingSidebarTab?: WorkingSidebarTab;
   /**
+   * Width of the agent chat right-side WorkingSidebar (space / params / files / …).
+   * Persisted so resizing survives remounts when navigating away and back.
+   */
+  workingSidebarWidth?: number;
+  /**
    * Workspace-mode overlay for sidebar layout/visibility preferences.
    * When the user is inside a workspace (see `useActiveWorkspaceId`), reads
    * fall back to these values instead of the top-level fields, and writes
@@ -466,6 +473,7 @@ export const INITIAL_STATUS = {
   videoPanelWidth: 320,
   videoTopicViewMode: 'grid' as const,
   videoTopicPanelWidth: 80,
+  workingSidebarWidth: 360,
 } satisfies SystemStatus;
 
 export const initialState: GlobalState = {

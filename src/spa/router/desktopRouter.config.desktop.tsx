@@ -15,6 +15,7 @@ import type { RouteObject } from 'react-router';
 import {
   BusinessDesktopRoutesWithMainLayout,
   BusinessDesktopRoutesWithoutMainLayout,
+  BusinessResourceRoutes,
 } from '@/business/client/BusinessDesktopRoutes';
 import { agentDocumentRouteMeta } from '@/features/AgentDocumentPage/routeMeta';
 import { taskRouteMeta, tasksRouteMeta } from '@/features/AgentTasks/routeMeta';
@@ -54,6 +55,7 @@ import AgentPage from '@/routes/(main)/agent';
 import DesktopChatLayout from '@/routes/(main)/agent/_layout';
 import DesktopAgentChatLayout from '@/routes/(main)/agent/(chat)/_layout';
 import AgentChannelPage from '@/routes/(main)/agent/channel';
+import AgentChannelPlatformPage from '@/routes/(main)/agent/channel/[platform]';
 import AgentDocumentsIndexRoute from '@/routes/(main)/agent/docs';
 import AgentDocumentLayout from '@/routes/(main)/agent/docs/_layout';
 import AgentDocumentRoute from '@/routes/(main)/agent/docs/[docId]';
@@ -186,6 +188,10 @@ export const sharedMainAreaChildren: RouteObject[] = [
           {
             element: <AgentChannelPage />,
             path: 'channel',
+          },
+          {
+            element: <AgentChannelPlatformPage />,
+            path: 'channel/:platform',
           },
           {
             element: <AgentTopicsPage />,
@@ -398,6 +404,7 @@ export const sharedMainAreaChildren: RouteObject[] = [
             },
             index: true,
           },
+          ...BusinessResourceRoutes,
         ],
         element: <ResourceHomeLayout />,
       },
