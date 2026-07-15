@@ -8,6 +8,10 @@ export default {
   'balance.plansUsageDesc': 'Subscription credits are used first, then top-up credits',
   'balance.title': 'Balance',
   'billing.amount': 'Amount',
+  'billing.cardBindingGift.cta': 'Claim now',
+  'billing.cardBindingGift.description':
+    'Add your first payment method and 1M credits land in your account instantly — no charge, no subscription required.',
+  'billing.cardBindingGift.title': '🎁 Add a payment method, get 1M credits',
   'billing.closed': 'Closed',
   'billing.created': 'Payment Date',
   'billing.draft': 'Draft',
@@ -23,6 +27,7 @@ export default {
   'billing.pay': 'Pay Now',
   'billing.paymentGateway': 'Payment Gateway',
   'billing.paymentMethod': 'Payment Method',
+  'billing.paymentMethod.openFailed': 'Failed to open payment method setup',
   'billing.price': 'Subscription Price',
   'billing.startDate': 'Start Date',
   'billing.status': 'Transaction Status',
@@ -59,6 +64,8 @@ export default {
     'Does not include monthly credits, you need to configure your own model API',
   'compare.monthlyCredit': 'Monthly Credits',
   'compare.title': 'Plan Comparison',
+  'creditUsageReminder.title':
+    '{{percent}} of the subscription credits included in this billing cycle have been used',
   'compareAllPlans': 'View All Plans',
   'comparePlans': 'View Plans',
   'createSubscriptionError': 'Failed to create subscription',
@@ -76,11 +83,19 @@ export default {
   'discount.maxOff': 'Up to {{percent}}% off',
   'discount.off': '{{percent}}% off',
   'discount.save': 'Save',
+  'modelSelection.confirm.continue': 'Continue using',
+  'modelSelection.confirm.description':
+    '{{model}} can incur higher usage costs. Review its current rates before continuing.',
+  'modelSelection.confirm.inputPrice': 'Input',
+  'modelSelection.confirm.outputPrice': 'Output',
+  'modelSelection.confirm.title': 'Use {{model}}?',
   'downgradePlans.alert':
     'You will still enjoy the benefits until the current plan expires ({{date}}). The new plan will take effect after the current plan expires.',
   'downgradePlans.desc': 'The plan change will take effect after the current plan expires.',
   'downgradePlans.success': 'Subscription cancelled successfully',
   'downgradePlans.title': 'Switch to {{plan}}',
+  'credits.autoTopUp.cardBindingGiftHint':
+    '🎁 Add your first payment method and get 1M credits free',
   'credits.autoTopUp.currentBalance': 'Current Balance',
   'credits.autoTopUp.desc': 'Ensure your credits never run out',
   'credits.autoTopUp.noCustomerHint':

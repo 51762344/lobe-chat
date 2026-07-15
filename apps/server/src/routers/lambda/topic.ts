@@ -11,7 +11,6 @@ import {
 import { cleanObject } from '@lobechat/utils';
 import { TRPCError } from '@trpc/server';
 import { inArray } from 'drizzle-orm';
-import { after } from 'next/server';
 import { z } from 'zod';
 
 import { withScopedPermission } from '@/business/server/trpc-middlewares/rbacPermission';
@@ -34,8 +33,10 @@ import type { LobeChatDatabase } from '@/database/type';
 import { router } from '@/libs/trpc/lambda';
 import { serverDatabase } from '@/libs/trpc/lambda/middleware';
 import { FileService } from '@/server/services/file';
+import { after } from '@/server/utils/scheduleAfterResponse';
 import { type BatchTaskResult } from '@/types/service';
 
+import { assertWorkspaceRowManageable } from './_helpers/assertWorkspaceRowManageable';
 import {
   batchResolveAgentIdFromSessions,
   resolveAgentIdFromSession,
@@ -53,6 +54,7 @@ const topicProcedure = wsCompatProcedure.use(serverDatabase).use(async (opts) =>
       agentModel: new AgentModel(ctx.serverDB, ctx.userId, wsId),
       agentOperationModel: new AgentOperationModel(ctx.serverDB, ctx.userId, wsId),
       chatGroupModel: new ChatGroupModel(ctx.serverDB, ctx.userId, wsId),
+      fileModel: new FileModel(ctx.serverDB, ctx.userId, wsId),
       heteroSessionImporterRepo: new HeteroSessionImporterRepo(ctx.serverDB, ctx.userId, wsId),
       topicImporterRepo: new TopicImporterRepo(ctx.serverDB, ctx.userId, wsId),
       topicModel: new TopicModel(ctx.serverDB, ctx.userId, wsId),
@@ -210,6 +212,11 @@ export const topicRouter = router({
     .use(withScopedPermission('topic:delete'))
     .input(z.object({ ids: z.array(z.string()) }))
     .mutation(async ({ input, ctx }) => {
+      const rows = await ctx.topicModel.findOwnersByIds(input.ids);
+      for (const userId of new Set(rows.map((row) => row.userId))) {
+        assertWorkspaceRowManageable(ctx, userId, 'topic');
+      }
+
       return ctx.topicModel.batchDelete(input.ids);
     }),
 
@@ -217,7 +224,11 @@ export const topicRouter = router({
     .use(withScopedPermission('topic:delete'))
     .input(z.object({ agentId: z.string() }))
     .mutation(async ({ input, ctx }) => {
-      return ctx.topicModel.batchDeleteByAgentId(input.agentId);
+      // Workspace topic sweeps are caller-scoped for every role — owners
+      // included (bulk actions only affect caller-created content).
+      const restrictToCreator = !!ctx.workspaceId;
+
+      return ctx.topicModel.batchDeleteByAgentId(input.agentId, { restrictToCreator });
     }),
 
   batchDeleteBySessionId: topicProcedure
@@ -236,7 +247,11 @@ export const topicRouter = router({
         ctx.workspaceId ?? undefined,
       );
 
-      return ctx.topicModel.batchDeleteBySessionId(resolved.sessionId);
+      // Workspace topic sweeps are caller-scoped for every role — owners
+      // included (bulk actions only affect caller-created content).
+      const restrictToCreator = !!ctx.workspaceId;
+
+      return ctx.topicModel.batchDeleteBySessionId(resolved.sessionId, { restrictToCreator });
     }),
 
   batchMoveTopics: topicProcedure
@@ -248,6 +263,11 @@ export const topicRouter = router({
       }),
     )
     .mutation(async ({ input, ctx }) => {
+      const rows = await ctx.topicModel.findOwnersByIds(input.topicIds);
+      for (const userId of new Set(rows.map((row) => row.userId))) {
+        assertWorkspaceRowManageable(ctx, userId, 'topic');
+      }
+
       return ctx.topicModel.batchMoveToAgent(input.topicIds, input.targetAgentId);
     }),
 
@@ -472,10 +492,26 @@ export const topicRouter = router({
         }
       };
 
-      // Use Next.js after() for non-blocking execution
       after(runMigration);
 
       return { items: result.items, total: result.total };
+    }),
+
+  hasTopicFiles: topicProcedure
+    .use(withScopedPermission('topic:delete'))
+    .input(z.object({ ids: z.array(z.string()).min(1) }))
+    .query(async ({ input, ctx }) => {
+      try {
+        const hasFiles = await ctx.fileModel.hasFilesByTopicIds(input.ids);
+        return { data: { hasFiles }, success: true };
+      } catch (error) {
+        console.error('[topic:hasTopicFiles]', error);
+        throw new TRPCError({
+          cause: error,
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to check topic files',
+        });
+      }
     }),
 
   hasTopics: topicProcedure.query(async ({ ctx }) => {
@@ -628,7 +664,6 @@ export const topicRouter = router({
         }
       };
 
-      // Use Next.js after() for non-blocking execution
       after(runMigration);
 
       // Assemble final result
@@ -674,23 +709,27 @@ export const topicRouter = router({
     .use(withScopedPermission('topic:delete'))
     .input(z.object({ id: z.string(), removeFiles: z.boolean().optional() }))
     .mutation(async ({ input, ctx }) => {
-      if (!input.removeFiles) return ctx.topicModel.delete(input.id);
+      const topic = await ctx.topicModel.findById(input.id);
+      if (topic) assertWorkspaceRowManageable(ctx, topic.userId, 'topic');
 
-      const wsId = ctx.workspaceId ?? undefined;
-      const fileModel = new FileModel(ctx.serverDB, ctx.userId, wsId);
+      if (!input.removeFiles) return ctx.topicModel.delete(input.id);
 
       // Collect the topic's deletable attachments BEFORE deleting it — the lookup
       // joins messages, which are cascade-deleted along with the topic. Files
       // still referenced by another topic or the session are intentionally kept.
-      const fileIds = await fileModel.findDeletableFilesByTopicId(input.id);
+      const fileIds = await ctx.fileModel.findDeletableFilesByTopicId(input.id);
 
       const result = await ctx.topicModel.delete(input.id);
 
       if (fileIds.length > 0) {
-        const needToRemove = await fileModel.deleteMany(fileIds, serverDBEnv.REMOVE_GLOBAL_FILE);
+        const needToRemove = await ctx.fileModel.deleteMany(
+          fileIds,
+          serverDBEnv.REMOVE_GLOBAL_FILE,
+        );
         // deleteMany returns only files whose underlying object is no longer
         // referenced by any other file, so the S3 cleanup is reference-safe.
         if (needToRemove && needToRemove.length > 0) {
+          const wsId = ctx.workspaceId ?? undefined;
           const fileService = new FileService(ctx.serverDB, ctx.userId, wsId);
           await fileService.deleteFiles(needToRemove.map((file) => file.url!));
         }
@@ -781,6 +820,8 @@ export const topicRouter = router({
       }),
     )
     .mutation(async ({ input, ctx }) => {
+      // Intentionally no creator/owner gate: shared topics are co-editable by
+      // members (title/status/metadata); only delete/transfer is creator-scoped.
       const { agentId, ...restValue } = input.value;
 
       // If agentId is provided, resolve to sessionId
@@ -807,6 +848,9 @@ export const topicRouter = router({
       }),
     )
     .mutation(async ({ input, ctx }) => {
+      // Intentionally no creator/owner gate: metadata follows the same
+      // co-editable path as updateTopic (chat/tool flows write fields like
+      // runningOperation on shared topics); only delete/transfer is gated.
       return ctx.topicModel.updateMetadata(input.id, input.metadata);
     }),
 });
