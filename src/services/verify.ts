@@ -17,6 +17,11 @@ import type {
 } from '@/database/schemas/verify';
 import { lambdaClient } from '@/libs/trpc/client';
 
+export type AcceptanceBundle = Awaited<ReturnType<typeof lambdaClient.acceptance.getBundle.query>>;
+export type AcceptanceListItem = Awaited<
+  ReturnType<typeof lambdaClient.acceptance.list.query>
+>[number];
+
 /** Editable fields of a single delivery-check criterion. */
 export interface UpdateCriterionValue {
   description?: string | null;
@@ -130,6 +135,18 @@ export interface GenerateDraftPlanInput {
 
 /** Client wrapper around the `verify` lambda router. */
 export class VerifyService {
+  // ---- subject-level acceptance ----
+  getAcceptanceBundle = (id: string): Promise<AcceptanceBundle> =>
+    lambdaClient.acceptance.getBundle.query({ id });
+
+  listAcceptances = (): Promise<AcceptanceListItem[]> => lambdaClient.acceptance.list.query();
+
+  acceptDelivery = (id: string, comment?: string) =>
+    lambdaClient.acceptance.accept.mutate({ comment, id });
+
+  rejectDelivery = (id: string, comment: string) =>
+    lambdaClient.acceptance.reject.mutate({ comment, id });
+
   // ---- per-run plan ----
   getVerifyState = (operationId: string): Promise<VerifyStateResponse | null> =>
     lambdaClient.verify.getVerifyState.query({

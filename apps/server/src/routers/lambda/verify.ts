@@ -1,6 +1,6 @@
 import { VerifySkill } from '@lobechat/builtin-skills';
-import { normalizeVerifySurface, verifySurfaces } from '@lobechat/const/verify';
-import type { VerifyCheckItem } from '@lobechat/types';
+import { normalizeVerifySurface, verifyRunScenarios, verifySurfaces } from '@lobechat/const/verify';
+import type { VerifyCheckItem, VerifyRunContext, VerifyRunScenario } from '@lobechat/types';
 import { TRPCError } from '@trpc/server';
 import { asc, eq } from 'drizzle-orm';
 import { z } from 'zod';
@@ -10,7 +10,6 @@ import {
   wsCompatProcedure,
 } from '@/business/server/trpc-middlewares/workspaceAuth';
 import { AgentOperationModel } from '@/database/models/agentOperation';
-import { FileModel } from '@/database/models/file';
 import { LlmGenerationTracingModel } from '@/database/models/llmGenerationTracing';
 import { VerifyCheckResultModel } from '@/database/models/verifyCheckResult';
 import { VerifyCriterionModel } from '@/database/models/verifyCriterion';
@@ -26,8 +25,9 @@ import {
 } from '@/database/schemas/verify';
 import { publicProcedure, router } from '@/libs/trpc/lambda';
 import { serverDatabase } from '@/libs/trpc/lambda/middleware';
-import { FileService } from '@/server/services/file';
 import {
+  AcceptanceService,
+  createEvidenceFileResolver,
   finalizeVerifyRun,
   VerifyExecutorService,
   VerifyFeedbackService,
@@ -89,6 +89,7 @@ const rubricConfigSchema = z.object({
 });
 
 const checkItemSchema = z.object({
+  category: z.string().optional(),
   description: z.string().optional(),
   id: z.string(),
   index: z.number(),
@@ -96,6 +97,7 @@ const checkItemSchema = z.object({
   required: z.boolean(),
   sourceCriterionId: z.string().nullish(),
   sourceRubricId: z.string().nullish(),
+  supersedes: z.array(z.string()).optional(),
   title: z.string(),
   verifierConfig: z.record(z.string(), z.unknown()),
   verifierType: verifierTypeSchema,
@@ -107,8 +109,9 @@ const omitUndefined = <T extends Record<string, unknown>>(value: T): Partial<T> 
     Object.entries(value).filter(([, field]) => field !== undefined),
   ) as Partial<T>;
 
-// The scenario's context (coding scope), rendered as the report's scope header.
-// Shared by createRun and updateRun so a re-ingest can refresh the scope in place.
+// The scenario's context, rendered as the report's scope header. Shared by
+// createRun and updateRun so a re-ingest can refresh the scope in place.
+// Validated per scenario at the door (see `withScenarioContext`).
 const webUrlSchema = z
   .string()
   .url()
@@ -145,7 +148,7 @@ const surfaceSchema = z.string().transform((value, ctx) => {
   return z.NEVER;
 });
 
-const runContextSchema = z.object({
+const codingRunContextSchema = z.object({
   branch: z.string().optional(),
   commit: z.string().optional(),
   entry: z.string().optional(),
@@ -154,19 +157,64 @@ const runContextSchema = z.object({
   testedAt: z.string().optional(),
 });
 
+/**
+ * Non-coding scenarios store the scope as an open bag. The known shapes live in
+ * `@lobechat/types` (`VerifyRunContext`); the server deliberately does not
+ * enumerate their fields, so a new scenario — or a new scope field on an
+ * existing one — never requires a server redeploy. Only `coding` gets strict
+ * validation, because its scope needs canonicalization at the door (surfaces).
+ */
+const genericRunContextSchema = z.record(z.string(), z.unknown());
+
+const scenarioSchema = z.enum(verifyRunScenarios);
+
+/**
+ * Validate `context` by its sibling `scenario`. Absent scenario defaults to
+ * `coding` (the legacy contract — an older `lh` posts a coding scope with no
+ * scenario field), so callers setting a non-coding context MUST send `scenario`
+ * in the same payload or the coding schema strips their fields. Applied as a
+ * transform (not a plain union) for two reasons: the coding path canonicalizes
+ * surfaces in place, and an ordered union of all-optional stripping objects
+ * would silently swallow a non-coding scope into the first match.
+ */
+const withScenarioContext = <T extends { context?: unknown; scenario?: VerifyRunScenario }>(
+  schema: z.ZodType<T>,
+) =>
+  schema.transform((value, ctx) => {
+    if (value.context === undefined) return { ...value, context: undefined };
+
+    const contextSchema =
+      (value.scenario ?? 'coding') === 'coding' ? codingRunContextSchema : genericRunContextSchema;
+    const parsed = contextSchema.safeParse(value.context);
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) {
+        ctx.addIssue({
+          code: 'custom',
+          message: issue.message,
+          path: ['context', ...issue.path],
+        });
+      }
+      return z.NEVER;
+    }
+
+    return { ...value, context: parsed.data as VerifyRunContext };
+  });
+
 const runMetadataSchema = z.record(z.string(), z.unknown());
 
 const updateRunInputSchema = verifyRunIdInputSchema.extend({
   // Every field optional — a re-ingest may refresh only the context/goal while
   // keeping the original title, so nothing here is required.
-  value: z.object({
-    context: runContextSchema.optional(),
-    goal: z.string().optional(),
-    metadata: runMetadataSchema.optional(),
-    plan: z.array(checkItemSchema).optional(),
-    scenario: z.enum(['coding']).optional(),
-    title: z.string().trim().min(1).max(200).optional(),
-  }),
+  value: withScenarioContext(
+    z.object({
+      context: z.unknown().optional(),
+      goal: z.string().optional(),
+      metadata: runMetadataSchema.optional(),
+      plan: z.array(checkItemSchema).optional(),
+      scenario: scenarioSchema.optional(),
+      title: z.string().trim().min(1).max(200).optional(),
+    }),
+  ),
 });
 
 // Cursor-paginated report list. `cursor` is the opaque token from the previous
@@ -575,19 +623,21 @@ export const verifyRouter = router({
   // report — all keyed by verifyRunId.
   createRun: verifyWriteProcedure
     .input(
-      z.object({
-        // The active scenario's context, rendered as the report's scope header.
-        context: runContextSchema.optional(),
-        goal: z.string().optional(),
-        metadata: runMetadataSchema.optional(),
-        operationId: z.string().optional(),
-        // The checks the run set out to make, authored before it ran. Kept next
-        // to the results so a planned-but-never-executed item stays visible.
-        plan: z.array(checkItemSchema).optional(),
-        scenario: z.enum(['coding']).optional(),
-        source: runSourceSchema.optional(),
-        title: z.string().optional(),
-      }),
+      withScenarioContext(
+        z.object({
+          // The active scenario's context, rendered as the report's scope header.
+          context: z.unknown().optional(),
+          goal: z.string().optional(),
+          metadata: runMetadataSchema.optional(),
+          operationId: z.string().optional(),
+          // The checks the run set out to make, authored before it ran. Kept next
+          // to the results so a planned-but-never-executed item stays visible.
+          plan: z.array(checkItemSchema).optional(),
+          scenario: scenarioSchema.optional(),
+          source: runSourceSchema.optional(),
+          title: z.string().optional(),
+        }),
+      ),
     )
     .mutation(async ({ ctx, input }) =>
       ctx.runModel.create({
@@ -904,7 +954,7 @@ export const verifyRouter = router({
       // The upsert overwrites the run's existing report row.
       assertWorkspaceRowManageable(ctx, run.userId, 'verify run');
 
-      return ctx.reportModel.upsertByRun({
+      const report = await ctx.reportModel.upsertByRun({
         content: input.content ?? null,
         failedChecks: input.failedChecks ?? null,
         generatedBy: input.generatedBy ?? 'agent-testing',
@@ -916,6 +966,23 @@ export const verifyRouter = router({
         verdict: input.verdict ?? null,
         verifyRunId: run.id,
       });
+
+      // A published report settles an ingested round — re-derive the aggregate
+      // it chains onto (→ `delivered`, awaiting the user's decision). Best-effort:
+      // the report write must not fail on a rollup hiccup.
+      if (run.acceptanceId) {
+        try {
+          await new AcceptanceService(
+            ctx.serverDB,
+            ctx.userId,
+            ctx.workspaceId ?? undefined,
+          ).recomputeStatus(run.acceptanceId);
+        } catch (error) {
+          console.error('[verify:upsertReport:recomputeAcceptance]', error);
+        }
+      }
+
+      return report;
     }),
 
   getReport: verifyProcedure.input(verifyRunIdInputSchema).query(async ({ ctx, input }) => {
@@ -983,47 +1050,11 @@ export const verifyRouter = router({
       ]);
 
       // Resolve display metadata for each file-backed evidence artifact.
-      let fileService: FileService | null | undefined;
-      const getFileService = () => {
-        if (fileService !== undefined) return fileService;
-
-        try {
-          fileService = new FileService(ctx.serverDB, run.userId, run.workspaceId ?? undefined);
-        } catch (error) {
-          console.error('[verify:getReportBundle:resolveFileMeta]', error);
-          fileService = null;
-        }
-
-        return fileService;
-      };
-      const resolveFileMeta = async (fileId: string | null) => {
-        if (!fileId) return { fileName: null, fileUrl: null };
-
-        try {
-          const file = await FileModel.getFileById(ctx.serverDB, fileId);
-          if (!file) return { fileName: null, fileUrl: null };
-          if (!file.url) return { fileName: file.name ?? null, fileUrl: null };
-
-          const service = getFileService();
-          if (!service) return { fileName: file.name ?? null, fileUrl: null };
-
-          try {
-            return {
-              fileName: file.name ?? null,
-              fileUrl: await service.getFullFileUrl(file.url),
-            };
-          } catch (error) {
-            console.error('[verify:getReportBundle:resolveFileMeta]', error);
-            return { fileName: file.name ?? null, fileUrl: null };
-          }
-        } catch (error) {
-          console.error('[verify:getReportBundle:resolveFileMeta]', error);
-          return {
-            fileName: null,
-            fileUrl: null,
-          };
-        }
-      };
+      const resolveFileMeta = createEvidenceFileResolver(
+        ctx.serverDB,
+        run.userId,
+        run.workspaceId ?? undefined,
+      );
 
       const resultsWithEvidence = await Promise.all(
         results.map(async (r) => {
