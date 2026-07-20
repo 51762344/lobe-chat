@@ -21,11 +21,13 @@ export type {
   MainRecordUsageIntent,
   MainResolveToolResultIntent,
   MainStreamContentIntent,
+  MainUpdateToolStateIntent,
   PersistAssistantIntent,
   SetErrorIntent,
 } from './mainAgentCoordinator';
 export { createMainAgentRunState, reduceMainAgent } from './mainAgentCoordinator';
 export { createAdapter, listAgentTypes } from './registry';
+export { isHeteroStatusGuideErrorData } from './spawn/classifyProcessFailure';
 export type {
   CreateMessageIntent,
   CreateThreadIntent,
@@ -40,6 +42,7 @@ export type {
   SubagentReduceCtx,
   SubagentRunSnapshot,
   SubagentRunsState,
+  UpdateToolStateIntent,
 } from './subagentCoordinator';
 export {
   createSubagentRunsState,
@@ -62,4 +65,5 @@ export type {
   ToolCallPayload,
   ToolEndData,
   ToolResultData,
+  ToolStateChunkData,
 } from './types';

@@ -39,6 +39,7 @@ import type { LobeChatDatabase } from '@lobechat/database';
 import { isRemoteHeterogeneousType } from '@lobechat/heterogeneous-agents';
 import { buildTaskManagerDefaultsPrompt, resourcesTreePrompt } from '@lobechat/prompts';
 import type {
+  AgentModelOverride,
   ChatAudioItem,
   ChatFileItem,
   ChatTopicBotContext,
@@ -67,6 +68,7 @@ import {
   ReasoningGraphSchema,
   RequestTrigger,
   resolveAgencyConfig,
+  resolveAgentModelConfig,
   ThreadStatus,
   ThreadType,
 } from '@lobechat/types';
@@ -98,6 +100,7 @@ import {
   isDeviceCapablePlan,
   isDeviceLockedPlan,
   resolveExecutionPlan,
+  resolveToolMode,
 } from '@/helpers/executionTarget';
 import { shouldEnableBuiltinSkill } from '@/helpers/skillFilters';
 import { buildConnectorManifests } from '@/libs/mcp/buildConnectorManifests';
@@ -151,6 +154,11 @@ import type { ConversationHistoryEntry } from '@/server/services/heterogeneousAg
 import { buildCloudHeteroContext } from '@/server/services/heterogeneousAgent/cloudHeteroContext';
 import { buildRemoteDeviceHeteroContext } from '@/server/services/heterogeneousAgent/remoteDeviceHeteroContext';
 import { MarketService } from '@/server/services/market';
+import {
+  buildConnectorOwnershipPrompt,
+  collectBorrowedConnectors,
+  resolveUserDisplayMap,
+} from '@/server/utils/connectorAttribution';
 import { markdownToTxt } from '@/utils/markdownToTxt';
 
 import { resolveDeviceAccessPolicy } from './deviceAccessPolicy';
@@ -1095,6 +1103,8 @@ export class AiAgentService {
       appContext,
       autoStart = true,
       botContext,
+      clientIp,
+      userAgent,
       deviceId: requestedDeviceId,
       botPlatformContext,
       discordContext,
@@ -1180,17 +1190,13 @@ export class AiAgentService {
 
     // Use actual agent ID from config for subsequent operations
     const resolvedAgentId = agentConfig.id;
+    let memberModelOverride: AgentModelOverride | undefined;
 
-    // Layer this caller's per-user device override (LOBE-11689) over the shared
-    // agencyConfig so THIS user's Cloud Sandbox / workspace-device / local pick
-    // drives dispatch instead of whichever choice landed on the shared row.
-    // Only applied for workspace agents — personal agents already have a single
-    // owner whose choice IS the shared config. The override lives in the
-    // dedicated `workspace_user_settings` table (per-(workspace, user)) so it
-    // stays orthogonal to member-list queries and cascades on either identity
-    // delete. `resolveAgencyConfig` is a no-op when no override exists, so a
-    // first-open (or a member who hasn't touched the switcher) transparently
-    // sees the shared default.
+    // Layer this caller's workspace-scoped execution and model preferences over
+    // the shared Agent row. Device selection keeps its existing fallback rules;
+    // model selection is applied only when the author explicitly allows member
+    // choice (an omitted policy is fixed). Both overrides live in the dedicated
+    // per-(workspace, user) settings row and never mutate shared Agent config.
     if (this.workspaceId) {
       try {
         const workspaceUserSettings = new WorkspaceUserSettingsModel(
@@ -1199,12 +1205,14 @@ export class AiAgentService {
           this.workspaceId,
         );
         const preference = await workspaceUserSettings.getPreference();
-        const override = preference.agentDeviceOverrides?.[resolvedAgentId];
-        agentConfig.agencyConfig = resolveAgencyConfig(agentConfig.agencyConfig, override);
+        const deviceOverride = preference.agentDeviceOverrides?.[resolvedAgentId];
+        agentConfig.agencyConfig = resolveAgencyConfig(agentConfig.agencyConfig, deviceOverride);
+
+        memberModelOverride = preference.agentModelOverrides?.[resolvedAgentId];
       } catch (error) {
-        // Losing the override is non-fatal: dispatch falls back to the shared
-        // agencyConfig, which is exactly the pre-LOBE-11689 behaviour.
-        log('execAgent: failed to load caller workspace_user_settings override: %O', error);
+        // Losing preferences is non-fatal: execution falls back to the shared
+        // Agent row, which is the safe fixed/default behavior.
+        log('execAgent: failed to load caller workspace_user_settings preferences: %O', error);
       }
     }
 
@@ -1217,12 +1225,16 @@ export class AiAgentService {
     // documents stay keyed on `resolvedAgentId`.
     const persistAgentId = appContext?.agentSignal?.agentId ?? resolvedAgentId;
 
-    // Apply per-call model/provider overrides. Sources include task.config and
-    // the callSubAgent spawn site, which resolves the sub-agent's default model
-    // from the parent agent's `agencyConfig.subagent` and passes it explicitly —
-    // so this execution path never has to special-case sub-agents.
-    if (modelOverride) agentConfig.model = modelOverride;
-    if (providerOverride) agentConfig.provider = providerOverride;
+    // Resolve the final model once, keeping per-call task / sub-agent overrides
+    // above the caller's personal workspace choice and the shared Agent default.
+    // The callSubAgent spawn site resolves the sub-agent default and passes it
+    // explicitly, so this path never has to special-case sub-agents.
+    const effectiveModel = resolveAgentModelConfig(agentConfig, memberModelOverride, {
+      ...(modelOverride ? { model: modelOverride } : {}),
+      ...(providerOverride ? { provider: providerOverride } : {}),
+    });
+    agentConfig.model = effectiveModel.model;
+    agentConfig.provider = effectiveModel.provider;
 
     log(
       'execAgent: got agent config for %s (id: %s), model: %s, provider: %s',
@@ -1525,7 +1537,18 @@ export class AiAgentService {
     // 3. Handle topic creation: if no topicId provided, create a new topic; otherwise reuse existing
     let topicId = appContext?.topicId;
     const isNewTopic = !topicId;
-    const topicBoundDeviceId = requestedDeviceId;
+    const isFixedExecutionTargetSelection =
+      !!this.workspaceId && agentConfig.agencyConfig?.executionTargetSelectionPolicy === 'fixed';
+    const isFixedDeviceTarget =
+      isFixedExecutionTargetSelection && agentConfig.agencyConfig?.executionTarget === 'device';
+    const effectiveRequestedDeviceId = isFixedExecutionTargetSelection
+      ? undefined
+      : requestedDeviceId;
+    const topicBoundDeviceId = isFixedDeviceTarget
+      ? agentConfig.agencyConfig?.boundDeviceId
+      : isFixedExecutionTargetSelection
+        ? undefined
+        : requestedDeviceId;
     if (!topicId) {
       if (resume) {
         throw new Error('Resume mode requires the parent message to belong to a topic');
@@ -1535,10 +1558,10 @@ export class AiAgentService {
       // client-supplied initial metadata (e.g. repos selected before first message).
       const initialTopicMeta = appContext?.initialTopicMetadata;
       const metadata =
-        cronJobId || operationTaskId || botContext || requestedDeviceId || initialTopicMeta
+        cronJobId || operationTaskId || botContext || topicBoundDeviceId || initialTopicMeta
           ? {
               bot: botContext,
-              boundDeviceId: requestedDeviceId,
+              boundDeviceId: topicBoundDeviceId,
               cronJobId: cronJobId || undefined,
               taskId: operationTaskId,
               ...(initialTopicMeta?.repos && { repos: initialTopicMeta.repos }),
@@ -1607,16 +1630,16 @@ export class AiAgentService {
     // 3.5. Hetero-agent early exit — local CLI and remote platform agents bypass the
     // server-side LLM pipeline.  After topic + message creation we hand off to
     // the device gateway (desktop) or cloud sandbox, which will push events
-    // back via `heteroIngest` / `heteroFinish` (claude-code / codex) or
+    // back via `heteroIngest` / `heteroFinish` (claude-code / codex / opencode) or
     // `agentNotify.notify` (openclaw / hermes).
     //
     // Detection: prefer agencyConfig.heterogeneousProvider.type (set by the UI),
     // fall back to model field for backwards compatibility.
-    const HETERO_AGENT_MODELS = new Set<string>(['amp', 'claude-code', 'codex']);
+    const HETERO_AGENT_MODELS = new Set<string>(['amp', 'claude-code', 'codex', 'opencode']);
     const heteroProviderType = agentConfig.agencyConfig?.heterogeneousProvider?.type;
     const isHeteroAgent = !!heteroProviderType || HETERO_AGENT_MODELS.has(model);
     const heteroType = (heteroProviderType ?? model) as
-      'amp' | 'claude-code' | 'codex' | 'hermes' | 'openclaw';
+      'amp' | 'claude-code' | 'codex' | 'hermes' | 'openclaw' | 'opencode';
 
     // ── Shared turn setup (runs for BOTH hetero and normal agents) ──────────
     // Everything up to and including persisting the turn is identical for both
@@ -1896,7 +1919,10 @@ export class AiAgentService {
           ? runAttachments.imageList.map((image) => ({ id: image.id, url: image.url }))
           : undefined;
       const heteroExecArgs =
-        heteroType === 'amp' || heteroType === 'claude-code' || heteroType === 'codex'
+        heteroType === 'amp' ||
+        heteroType === 'claude-code' ||
+        heteroType === 'codex' ||
+        heteroType === 'opencode'
           ? buildHeteroExecArgs(
               agentConfig.agencyConfig?.heterogeneousProvider?.type === heteroType
                 ? agentConfig.agencyConfig.heterogeneousProvider
@@ -1920,7 +1946,7 @@ export class AiAgentService {
       };
 
       const remoteDeviceId =
-        requestedDeviceId || agentConfig.agencyConfig?.boundDeviceId || undefined;
+        effectiveRequestedDeviceId || agentConfig.agencyConfig?.boundDeviceId || undefined;
 
       // Register the run's lifecycle hooks so the hetero terminal path fires
       // onComplete/onError through the same `hookDispatcher` the normal LLM
@@ -2077,20 +2103,21 @@ export class AiAgentService {
           };
         }
       } else {
-        // Local CLI hetero (Amp / Claude Code / Codex) — fork between device dispatch
+        // Local CLI hetero (Amp / Claude Code / Codex / OpenCode) — fork between device dispatch
         // and cloud sandbox via the shared execution plan:
         //   - requestedDeviceId (topic-level override) always wins
         //   - executionTarget 'device' → dispatch to boundDeviceId (errors if unset)
         //   - executionTarget 'local' + boundDeviceId (desktop sync opened on web)
         //     → dispatch to that device
         //   - everything else ('sandbox' / unbound 'local' / 'none' / unset) → cloud
-        //     sandbox (the server can't spawn locally, and a hetero agent must
-        //     execute somewhere)
+        //     sandbox when the provider supports it; Amp and OpenCode remain
+        //     unrouted because they require a local or connected device
         // `onlineDeviceIds` is intentionally omitted: hetero dispatch trusts
         // the binding and fails loudly at the gateway if the device is offline.
-        // `canUseDevice` degrades device-capable targets to the sandbox for
-        // denied senders (e.g. external bot users) — without it a synced
-        // local/device binding would let them run on the owner's machine.
+        // `canUseDevice` degrades device-capable targets to the sandbox when
+        // available, or leaves device-only providers unrouted, for denied
+        // senders (e.g. external bot users). Without this a synced local/device
+        // binding would let them run on the owner's machine.
 
         // Register the op with the agent-gateway DO before dispatch, mirroring
         // the remote-hetero branch above. Local CLI hetero (claude-code / codex)
@@ -2125,7 +2152,7 @@ export class AiAgentService {
           isHetero: true,
           clientExecutionAvailable: false,
           requestedDeviceId,
-          sandboxExecutionAvailable: heteroType !== 'amp',
+          sandboxExecutionAvailable: heteroType === 'claude-code' || heteroType === 'codex',
           trigger: requestTriggerMetadata?.trigger,
         });
 
@@ -2137,7 +2164,7 @@ export class AiAgentService {
               agentId: resolvedAgentId,
               assistantMessageId: assistantMessageRecord.id,
               detail:
-                heteroType === 'amp'
+                heteroType === 'amp' || heteroType === 'opencode'
                   ? 'No device bound. Pick a local or connected device in the Execution Device switcher.'
                   : 'No device bound. Pick a device in the Execution Device switcher, or switch to Cloud sandbox.',
               message: 'No bound device for hetero agent',
@@ -2240,9 +2267,8 @@ export class AiAgentService {
             };
           }
         } else {
-          if (heteroType === 'amp') {
-            const message =
-              'Amp requires a local or connected device; cloud sandbox execution is not supported.';
+          if (heteroType === 'amp' || heteroType === 'opencode') {
+            const message = `${heteroType === 'amp' ? 'Amp' : 'OpenCode'} requires a local or connected device; cloud sandbox execution is not supported.`;
             await this.finalizeHeteroDispatchError({
               agentId: resolvedAgentId,
               assistantMessageId: assistantMessageRecord.id,
@@ -2519,6 +2545,34 @@ export class AiAgentService {
               connectorGateKeeper,
             )
           : [];
+
+      // 5a-1b. Model awareness: when the caller runs a shared agent whose tools
+      // were authorized by OTHER members (workspace dimension), tell the model
+      // whose connected account each such tool runs on. Skipped entirely when
+      // the caller authorized everything (owner runs own agent → empty set), so
+      // it costs nothing in the common case. Appended to `systemRole`, which is
+      // consumed by `createOperation` further below.
+      try {
+        const borrowed = collectBorrowedConnectors(connectors, this.userId!);
+        if (borrowed.length > 0) {
+          const displayMap = await resolveUserDisplayMap(
+            this.db,
+            borrowed.map((b) => b.authorizerId),
+          );
+          const note = buildConnectorOwnershipPrompt(borrowed, displayMap);
+          if (note) {
+            agentConfig.systemRole = agentConfig.systemRole
+              ? `${agentConfig.systemRole}\n\n${note}`
+              : note;
+            log(
+              'execAgent: injected tool credential ownership note for %d connector(s)',
+              borrowed.length,
+            );
+          }
+        }
+      } catch (err) {
+        log('execAgent: failed to build tool credential ownership note: %O', err);
+      }
 
       // Only connectors WITH a real MCP endpoint (mcpServerUrl or stdio) can replace plugins in the
       // manifest. Connectors WITHOUT an endpoint (e.g. Lobehub/Composio OAuth skills synced via
@@ -2802,6 +2856,33 @@ export class AiAgentService {
         requestedDeviceId,
         trigger: requestTriggerMetadata?.trigger,
       });
+      // A fixed device target must never degrade to the cloud sandbox or a
+      // different device. Persist a visible assistant error and fail the RPC
+      // before tool/runtime preparation so no operation can start elsewhere.
+      if (
+        isFixedDeviceTarget &&
+        resolveToolMode(agentConfig.chatConfig ?? undefined) !== 'chat' &&
+        executionPlan.kind !== 'device'
+      ) {
+        const detail =
+          executionPlan.kind === 'device-unrouted' &&
+          executionPlan.reason === 'bound-device-offline'
+            ? 'The device fixed by this agent is offline. Ask an editor to bring it online or change the agent device policy.'
+            : 'The device fixed by this agent is unavailable for this run. Ask an editor to check the agent device policy.';
+        await this.messageModel.update(assistantMessageRecord.id, {
+          content: '',
+          error: {
+            body: { detail },
+            message: 'Fixed agent device unavailable',
+            type: 'ServerAgentRuntimeError',
+          },
+        });
+        throw new TRPCError({
+          cause: { data: { code: 'FixedAgentDeviceUnavailable' } },
+          code: 'PRECONDITION_FAILED',
+          message: detail,
+        });
+      }
       // Device tools (local-system / remote-device proxy) only exist in a
       // device-capable session — `none` and `sandbox` sessions must never see
       // them, not even the proxy that could activate a device mid-run.
@@ -3855,6 +3936,12 @@ export class AiAgentService {
           // context (state.metadata.agentId) targets the reviewed agent; ordinary
           // runs (no marker) fall back to the resolved executing agent.
           agentId: appContext?.agentSignal?.agentId ?? resolvedAgentId,
+          // Propagate the originating request's client IP / user agent into
+          // state.metadata (via the `...appContext` spread in createOperation) so
+          // downstream LLM-call metadata can carry them for auditing and spend
+          // attribution.
+          clientIp,
+          userAgent,
           // When scope === 'agent_builder', agentId stays as the builder builtin so
           // message ownership and queryUiMessages remain correct. editingAgentId
           // carries the actual editing target separately; only the AgentBuilder server

@@ -1,10 +1,21 @@
 import type {
+  AgentDeviceOverride,
   DeviceExecutionTarget,
   LobeAgentAgencyConfig,
   LobeAgentChatConfig,
   RuntimeEnvMode,
 } from '@lobechat/types';
 import { RequestTrigger } from '@lobechat/types';
+
+/**
+ * Whether a workspace config still needs the shared-row safety coercion.
+ * A member opts out only by explicitly choosing an execution target; a missing
+ * or bound-device-only override still inherits the raw shared target.
+ */
+export const resolveWorkspaceScoped = (
+  isWorkspaceAgent: boolean,
+  deviceOverride: AgentDeviceOverride | null | undefined,
+): boolean => isWorkspaceAgent && deviceOverride?.executionTarget === undefined;
 
 /**
  * The agent's tool mode — explicit `chatConfig.toolMode` wins; otherwise derive
@@ -69,9 +80,10 @@ export interface ResolveExecutionTargetOptions {
   isHetero?: boolean;
   /**
    * Whether this heterogeneous provider can execute in the server cloud
-   * sandbox. Defaults to `false` for Amp (which currently requires a local or
-   * connected device) and `true` otherwise. Callers that only know the provider
-   * through a legacy model discriminator can override the inferred capability.
+   * sandbox. Defaults to `false` for Amp and OpenCode (which currently require
+   * a local or connected device) and `true` otherwise. Callers that only know
+   * the provider through a legacy model discriminator can override the inferred
+   * capability.
    */
   sandboxExecutionAvailable?: boolean;
   /**
@@ -84,19 +96,23 @@ export interface ResolveExecutionTargetOptions {
    */
   trigger?: RequestTrigger;
   /**
-   * The agent belongs to a workspace (`agent.workspaceId` is set). Every
-   * member runs a workspace agent through the shared device pool, so the
-   * CURRENT member's own client is never a valid execution host — `local`
-   * would silently run the shared agent on whichever personal machine opened
-   * it. Treats client execution as unavailable: an unset target no longer
-   * defaults to `local`, and a stored `local` (synced from before the agent
-   * joined the workspace) coerces to `sandbox` when supported (otherwise
-   * `none`) — or, for hetero agents, to `device` when a (grandfathered)
-   * `boundDeviceId` pins a machine, matching the write-time guard in
-   * `AgentModel.assertWorkspaceDeviceBinding`.
+   * The supplied config is the raw workspace-shared fallback and has NOT been
+   * merged with the current member's `agentDeviceOverrides`. Such a config
+   * must not run `local` on whichever member happened to open it, so this
+   * treats client execution as unavailable and coerces legacy local values to
+   * sandbox/device as appropriate.
+   *
+   * Set this to `false` only when the current member has an explicit
+   * `executionTarget` override. Calling `resolveAgencyConfig` alone is not
+   * sufficient: without an override it returns the raw shared config unchanged.
+   * `useEffectiveAgencyConfig` exposes this distinction as `workspaceScoped`.
    */
   workspaceScoped?: boolean;
 }
+
+/** Whether a heterogeneous provider can run in LobeHub's cloud sandbox. */
+export const isHeterogeneousSandboxExecutionAvailable = (type: string | undefined): boolean =>
+  type !== 'amp' && type !== 'opencode';
 
 /**
  * Single source of truth for where an agent executes — one global
@@ -153,11 +169,13 @@ export const resolveExecutionTarget = (
     workspaceScoped,
   }: ResolveExecutionTargetOptions,
 ): DeviceExecutionTarget => {
-  // A workspace agent never executes on the current member's own client — see
-  // `workspaceScoped` above. Same coercions as a client-less environment.
+  // An unmerged workspace-shared config never executes on the current member's
+  // own client — see `workspaceScoped` above. Same coercions as a client-less
+  // environment.
   const clientAvailable = clientExecutionAvailable && !workspaceScoped;
   const sandboxAvailable =
-    sandboxExecutionAvailable ?? agencyConfig?.heterogeneousProvider?.type !== 'amp';
+    sandboxExecutionAvailable ??
+    isHeterogeneousSandboxExecutionAvailable(agencyConfig?.heterogeneousProvider?.type);
   const stored = agencyConfig?.executionTarget;
   let effective = stored ?? (clientAvailable ? 'local' : 'none');
   if (
@@ -318,8 +336,8 @@ export interface ResolveExecutionPlanParams {
   onlineDeviceIds?: string[];
   /**
    * Explicit per-request device override (e.g. the desktop preset, or a
-   * batch-task `deviceId`). Always wins: it forces device routing regardless
-   * of the stored target.
+   * batch-task `deviceId`). It forces device routing regardless of the stored
+   * target unless the shared workspace policy is `fixed`.
    */
   requestedDeviceId?: string;
   /** See {@link ResolveExecutionTargetOptions.sandboxExecutionAvailable}. */
@@ -340,9 +358,9 @@ export interface ResolveExecutionPlanParams {
  * Resolve the execution plan for a run. This is THE device decision — every
  * rule about which device (if any) a run touches lives here:
  *
- * 1. `requestedDeviceId` forces device routing; otherwise the resolved
- *    `executionTarget` decides (`auto` / `local` route to a device too — the
- *    local machine is just a device).
+ * 1. `requestedDeviceId` forces device routing unless the shared policy is
+ *    `fixed`; otherwise the resolved `executionTarget` decides (`auto` /
+ *    `local` route to a device too — the local machine is just a device).
  * 2. `none` / `sandbox` NEVER route to a device — no auto-activation, no
  *    step-level re-injection, no exceptions.
  * 3. `canUseDevice === false` degrades any device-capable target to `none`
@@ -386,9 +404,15 @@ export const resolveExecutionPlan = (params: ResolveExecutionPlanParams): Execut
     workspaceScoped,
   });
   const sandboxAvailable =
-    sandboxExecutionAvailable ?? agencyConfig?.heterogeneousProvider?.type !== 'amp';
+    sandboxExecutionAvailable ??
+    isHeterogeneousSandboxExecutionAvailable(agencyConfig?.heterogeneousProvider?.type);
+  // A fixed workspace execution target is an author-controlled contract. A
+  // stale member preference or an explicit task/request override must never
+  // route the run somewhere else.
+  const effectiveRequestedDeviceId =
+    agencyConfig?.executionTargetSelectionPolicy === 'fixed' ? undefined : requestedDeviceId;
   const wantsDevice =
-    !!requestedDeviceId || target === 'device' || target === 'local' || target === 'auto';
+    !!effectiveRequestedDeviceId || target === 'device' || target === 'local' || target === 'auto';
 
   if (!wantsDevice || !canUseDevice) {
     if (target === 'sandbox') return { kind: 'sandbox', target: 'sandbox' };
@@ -406,7 +430,7 @@ export const resolveExecutionPlan = (params: ResolveExecutionPlanParams): Execut
   // a stale binding left over from a previous `device` selection can't pin the
   // run. An explicit `requestedDeviceId` still wins everywhere.
   const boundDeviceId =
-    requestedDeviceId || (target === 'auto' ? undefined : agencyConfig?.boundDeviceId);
+    effectiveRequestedDeviceId || (target === 'auto' ? undefined : agencyConfig?.boundDeviceId);
   // requestedDeviceId may force device routing over a non-device stored target;
   // keep `auto` / `local` distinct, everything else collapses to `device`.
   const effectiveTarget = target === 'local' ? 'local' : target === 'auto' ? 'auto' : 'device';

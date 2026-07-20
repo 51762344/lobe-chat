@@ -102,9 +102,16 @@ describe('hetero exec command', () => {
     stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     mockResolveHeteroSpawnCommand.mockReset();
     mockResolveHeteroSpawnCommand.mockImplementation(
-      async (agentType: 'amp' | 'claude-code' | 'codex', command?: string) => ({
+      async (agentType: 'amp' | 'claude-code' | 'codex' | 'opencode', command?: string) => ({
         command:
-          command ?? (agentType === 'amp' ? 'amp' : agentType === 'codex' ? 'codex' : 'claude'),
+          command ??
+          (agentType === 'amp'
+            ? 'amp'
+            : agentType === 'codex'
+              ? 'codex'
+              : agentType === 'opencode'
+                ? 'opencode'
+                : 'claude'),
       }),
     );
     mockSpawnAgent.mockReset();
@@ -350,6 +357,39 @@ describe('hetero exec command', () => {
     );
   });
 
+  it('runs OpenCode with model, resume, and native args while ignoring effort and speed', async () => {
+    mockSpawnAgent.mockReturnValue(createFakeHandle());
+
+    await runCmd([
+      'hetero',
+      'exec',
+      '--type',
+      'opencode',
+      '--prompt',
+      'do thing',
+      '--resume',
+      'session-open-1',
+      '--model',
+      'anthropic/claude-sonnet-4',
+      '--effort',
+      'high',
+      '--speed',
+      'fast',
+      '--agent-arg=--variant',
+      '--agent-arg=max',
+    ]);
+
+    expect(mockResolveHeteroSpawnCommand).toHaveBeenCalledWith('opencode', undefined);
+    expect(mockSpawnAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentType: 'opencode',
+        command: 'opencode',
+        extraArgs: ['--variant', 'max', '--model', 'anthropic/claude-sonnet-4'],
+        resumeSessionId: 'session-open-1',
+      }),
+    );
+  });
+
   it('streams events to stdout as JSONL, one line per event', async () => {
     const events = [
       { data: { foo: 1 }, operationId: 'op-1', stepIndex: 0, timestamp: 1, type: 'stream_start' },
@@ -396,6 +436,107 @@ describe('hetero exec command', () => {
 
     await runCmd(['hetero', 'exec', '--type', 'claude-code', '--prompt', 'hi']);
     expect(exitSpy).toHaveBeenCalledWith(130);
+  });
+
+  it('flushes terminal tool events before finishing a server-ingest run as cancelled', async () => {
+    let sigintHandler: (() => void) | undefined;
+    vi.spyOn(process, 'on').mockImplementation(((event: string, listener: () => void) => {
+      if (event === 'SIGINT') sigintHandler = listener;
+      return process;
+    }) as typeof process.on);
+
+    let resolveFirstEvent: ((result: IteratorResult<Record<string, unknown>>) => void) | undefined;
+    let eventIndex = 0;
+    const events: AsyncIterable<Record<string, unknown>> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            if (eventIndex === 0) {
+              eventIndex += 1;
+              return new Promise<IteratorResult<Record<string, unknown>>>((resolve) => {
+                resolveFirstEvent = resolve;
+              });
+            }
+            if (eventIndex === 1) {
+              eventIndex += 1;
+              return {
+                done: false,
+                value: {
+                  data: { isSuccess: false, toolCallId: 'todo-1' },
+                  operationId: 'op-cancel',
+                  stepIndex: 0,
+                  timestamp: 2,
+                  type: 'tool_end',
+                },
+              };
+            }
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    const stderr = new PassThrough();
+    stderr.end();
+    const kill = vi.fn();
+    mockSpawnAgent.mockResolvedValue({
+      events,
+      exit: Promise.resolve({ code: null, signal: 'SIGINT' }),
+      kill,
+      pid: 12_345,
+      stderr,
+    });
+
+    const callOrder: string[] = [];
+    mockHeteroIngestMutate.mockImplementation(async ({ events: batch }) => {
+      callOrder.push(...batch.map((event: { type: string }) => event.type));
+      return { ack: true };
+    });
+    mockHeteroFinishMutate.mockImplementation(async ({ result }) => {
+      callOrder.push(`finish:${result}`);
+      return { ack: true };
+    });
+
+    const command = runCmd([
+      'hetero',
+      'exec',
+      '--type',
+      'codex',
+      '--prompt',
+      'hi',
+      '--topic',
+      'topic-1',
+      '--operation-id',
+      'op-cancel',
+      '--render',
+      'none',
+    ]);
+    for (let i = 0; i < 20 && !sigintHandler; i += 1) await Promise.resolve();
+
+    sigintHandler?.();
+    expect(kill).toHaveBeenCalledWith('SIGINT');
+    expect(mockHeteroFinishMutate).not.toHaveBeenCalled();
+
+    resolveFirstEvent?.({
+      done: false,
+      value: {
+        data: {
+          content: 'Todo list update interrupted.',
+          isError: true,
+          pluginState: { todos: { items: [] } },
+          toolCallId: 'todo-1',
+        },
+        operationId: 'op-cancel',
+        stepIndex: 0,
+        timestamp: 1,
+        type: 'tool_result',
+      },
+    });
+    await command;
+
+    expect(callOrder).toEqual(['tool_result', 'tool_end', 'finish:cancelled']);
+    expect(mockHeteroFinishMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ error: undefined, result: 'cancelled' }),
+    );
   });
 
   it('combines --prompt + --image into mixed content blocks', async () => {
@@ -888,11 +1029,12 @@ describe('hetero exec command', () => {
     });
   });
 
-  it('sends full text snapshots before tools and waits for finish until all server ingests ack', async () => {
+  it('batches snapshot + tool + terminal events into ordered ingest calls and finishes after the ack', async () => {
     const callOrder: string[] = [];
     mockHeteroIngestMutate.mockImplementation(async ({ events }: any) => {
-      const first = events[0];
-      callOrder.push(`ingest:${first.type}:${first.data?.chunkType ?? 'terminal'}`);
+      for (const event of events) {
+        callOrder.push(`ingest:${event.type}:${event.data?.chunkType ?? 'terminal'}`);
+      }
       return { ack: true };
     });
     mockHeteroFinishMutate.mockImplementation(async () => {
@@ -962,13 +1104,17 @@ describe('hetero exec command', () => {
       'none',
     ]);
 
-    expect(mockHeteroIngestMutate).toHaveBeenCalledTimes(3);
+    // The whole run fits one batched ingest call (3 events ≪ MAX_BATCH) —
+    // NOT one serial round-trip per event as before.
+    expect(mockHeteroIngestMutate).toHaveBeenCalledTimes(1);
     expect(mockHeteroIngestMutate.mock.calls[0][0].events[0].data).toMatchObject({
       chunkType: 'text',
       content: 'hello world',
       snapshotMode: 'replace',
       snapshotSeq: 1,
     });
+    // Within-batch order preserved (server processes a batch sequentially),
+    // and finish is only sent after every ingest acked.
     expect(callOrder).toEqual([
       'ingest:stream_chunk:text',
       'ingest:stream_chunk:tools_calling',
@@ -1018,6 +1164,66 @@ describe('hetero exec command', () => {
     expect(mockHeteroFinishMutate.mock.calls[0][0]).toMatchObject({
       error: {
         message: 'API Error: Server is temporarily limiting requests · Rate limited',
+        type: 'AgentRuntimeError',
+      },
+      result: 'error',
+    });
+  });
+
+  it('forwards the adapter-classified status-guide error as the finish error body', async () => {
+    // The adapter classifies overloaded / rate-limit terminal errors into a
+    // structured payload carrying `agentType` + `code` — the pair the client's
+    // status-guide UI gates on. The finish leg must forward it verbatim instead
+    // of flattening to `{ message }`, otherwise flushFinalState overwrites the
+    // in-stream persisted error and the client falls back to the generic alert.
+    const overloadedMessage =
+      'API Error: 529 Overloaded. This is a server-side issue, usually temporary.';
+    mockSpawnAgent.mockReturnValue(
+      createFakeHandle({
+        events: [
+          {
+            data: {
+              agentType: 'claude-code',
+              clearEchoedContent: true,
+              code: 'overloaded',
+              error: overloadedMessage,
+              message: overloadedMessage,
+              stderr: overloadedMessage,
+            },
+            operationId: 'op-err-guide',
+            stepIndex: 0,
+            timestamp: 1,
+            type: 'error',
+          },
+        ],
+        exitCode: 0,
+      }),
+    );
+
+    await runCmd([
+      'hetero',
+      'exec',
+      '--type',
+      'claude-code',
+      '--prompt',
+      'hi',
+      '--topic',
+      'topic-1',
+      '--operation-id',
+      'op-err-guide',
+      '--render',
+      'none',
+    ]);
+
+    expect(mockHeteroFinishMutate).toHaveBeenCalledTimes(1);
+    expect(mockHeteroFinishMutate.mock.calls[0][0]).toMatchObject({
+      error: {
+        body: {
+          agentType: 'claude-code',
+          code: 'overloaded',
+          message: overloadedMessage,
+        },
+        message: overloadedMessage,
         type: 'AgentRuntimeError',
       },
       result: 'error',

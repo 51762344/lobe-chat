@@ -38,6 +38,10 @@ export default {
   'agentDocument.openAsPage': 'Open as full page',
   'agentNotFound.desc':
     'This agent does not exist or is no longer accessible — it may have been deleted or set to private by its owner.',
+  'permission.configAccess.agentChatOnly':
+    'Only collaborators with Can edit can configure this Agent. You were returned to chat.',
+  'permission.configAccess.groupChatOnly':
+    'Only collaborators with Can edit can configure this Agent Group. You were returned to chat.',
   'agentNotFound.title': 'Agent Unavailable',
   'groupNotFound.desc':
     'This group does not exist or is no longer accessible — it may have been deleted or set to private by its owner.',
@@ -364,6 +368,22 @@ export default {
   'heteroAgent.modelSelector.speed.fastDesc': '1.5x speed, increased usage',
   'heteroAgent.modelSelector.speed.standard': 'Standard',
   'heteroAgent.modelSelector.speed.standardDesc': 'Default speed',
+  'heteroAgent.openCodeModel.ariaLabel': 'OpenCode model: {{model}}',
+  'heteroAgent.openCodeModel.cliNotFound': 'OpenCode is not installed on the target device.',
+  'heteroAgent.openCodeModel.defaultDesc': 'Use the default model configured in OpenCode',
+  'heteroAgent.openCodeModel.empty': 'OpenCode did not report any models.',
+  'heteroAgent.openCodeModel.error': 'Could not load models from OpenCode.',
+  'heteroAgent.openCodeModel.loading': 'Loading OpenCode models…',
+  'heteroAgent.openCodeModel.noMatch': 'No models match your search.',
+  'heteroAgent.openCodeModel.reload': 'Reload models',
+  'heteroAgent.openCodeModel.retry': 'Retry',
+  'heteroAgent.openCodeModel.saved': 'Saved model',
+  'heteroAgent.openCodeModel.search': 'Search models',
+  'heteroAgent.openCodeModel.stale': 'Not in latest catalog',
+  'heteroAgent.openCodeModel.targetUnavailable': 'The target device is unavailable.',
+  'heteroAgent.openCodeModel.timeout': 'OpenCode model discovery timed out.',
+  'heteroAgent.openCodeModel.unsupportedClient':
+    'Update the target device client to discover OpenCode models.',
   'heteroAgent.resumeReset.cwdChanged':
     'Working directory changed. Previous Claude Code session can only be resumed from its original directory, so a new conversation has started.',
   'heteroAgent.resumeReset.resumeFailed':
@@ -381,13 +401,15 @@ export default {
   'heteroAgent.cloudRepo.notSet': 'No repo selected',
   'heteroAgent.cloudRepo.noRepos': 'No repositories configured. Add them in agent settings.',
   'heteroAgent.cloudRepo.multiSelected': '{{count}} repos selected',
-  'heteroAgent.executionTarget.ampSandboxUnsupported':
-    'Amp currently runs only on a local or connected device',
+  'heteroAgent.executionTarget.sandboxUnsupported':
+    '{{name}} currently runs only on a local or connected device',
   'heteroAgent.executionTarget.auto': 'Auto',
   'heteroAgent.executionTarget.autoDesc':
     'Use an online device automatically, picking one when several are available',
+  'heteroAgent.executionTarget.fixedTip':
+    'This Agent uses an execution environment fixed by its editor. Ask an editor to change it.',
   'heteroAgent.executionTarget.infoTooltip':
-    'Pick a device and the agent uses it as its runtime environment — reading and writing files and operating the computer. Cloud sandbox is provided by LobeHub Marketplace.',
+    'Choose where this Agent runs. A device can read and write files or operate a computer; Cloud Sandbox runs in an isolated temporary environment.',
   'heteroAgent.executionTarget.gateway': 'Gateway',
   'heteroAgent.executionTarget.gatewayDesc':
     'Run through the device gateway so other clients can follow progress',
@@ -410,7 +432,7 @@ export default {
   'heteroAgent.executionTarget.downloadDesktop': 'Get Desktop App',
   'heteroAgent.executionTarget.downloadDesktopDesc': 'Run agents with access to your computer',
   'heteroAgent.executionTarget.downloadDesktopTitle': 'Get the desktop app',
-  'heteroAgent.executionTarget.title': 'Execution Device',
+  'heteroAgent.executionTarget.title': 'Execution Environment',
   'heteroAgent.executionTarget.unknownDevice': 'Unknown device',
   'hideForYou':
     "Direct message content is hidden. Please enable 'Show Direct Message Content' in settings to view.",
@@ -441,6 +463,10 @@ export default {
   'input.inputCompletionError.title': 'Input suggestions paused',
   'input.modelUnavailable':
     'The current model is no longer available. Choose another model to continue.',
+  'input.viewOnlyAgent':
+    'You have view-only access to this agent, so messages cannot be sent. Ask the creator or a workspace owner for access.',
+  'input.viewOnlyGroup':
+    'You have view-only access to this group, so messages cannot be sent. Ask the creator or a workspace owner for access.',
   'input.heteroPlus.tooltip': 'Formatting and scheduling',
   'input.more': 'More',
   'input.schedule.cancel': 'Cancel',
@@ -698,14 +724,28 @@ export default {
   'codexInstallGuide.menuNotification.title': 'Codex CLI not found',
   'codexInstallGuide.reason': 'LobeHub could not start Codex: {{message}}',
   'codexInstallGuide.title': 'Install Codex CLI',
+  'opencodeInstallGuide.actions.openDocs': 'Open Install Guide',
+  'opencodeInstallGuide.actions.openSystemTools': 'Open System Tools',
+  'opencodeInstallGuide.afterInstall':
+    'After installing, run OpenCode once to sign in, then retry your message or click Re-detect in System Tools.',
+  'opencodeInstallGuide.desc':
+    'OpenCode needs its CLI to run locally. Install it and make sure the opencode command is available in your PATH.',
+  'opencodeInstallGuide.installWithBrew': 'Alternative install',
+  'opencodeInstallGuide.installWithNpm': 'Recommended install',
+  'opencodeInstallGuide.menuNotification.title': 'OpenCode CLI not found',
+  'opencodeInstallGuide.reason': 'LobeHub could not start OpenCode: {{message}}',
+  'opencodeInstallGuide.title': 'Install OpenCode CLI',
   'addAgentFromMarket': 'Add from Market',
   'newAgent': 'Create Agent',
   'newAmpAgent': 'Add Amp',
   'newClaudeCodeAgent': 'Add Claude Code',
   'newCodexAgent': 'Add Codex',
+  'newOpenCodeAgent': 'Add OpenCode',
   'newPlatformAgent': 'Connect Agent',
   'newGroupChat': 'Create Group',
   'agent.publishToWorkspace': 'Publish to Workspace',
+  'agent.publishToWorkspaceErrorFixedPrivateDevice':
+    'Publish the fixed device to the workspace, or let members choose a device, before publishing this Agent.',
   'agent.publishToWorkspaceSuccess': 'Published to workspace',
   'resources.publishToWorkspace.menu': 'Publish to Workspace',
   'resources.publishToWorkspace.confirm':
@@ -735,7 +775,6 @@ export default {
   'platformAgent.create.desc.openclaw': 'Connect to OpenClaw running on one of your devices',
   'platformAgent.create.desc.hermes': 'Connect to Hermes running on one of your devices',
   'platformAgent.create.desc.amp': 'Connect to Amp running on one of your devices',
-  'platformAgent.create.desc.opencode': 'Connect to OpenCode running on one of your devices',
 
   // Connect agent: shared device status label (used in Select option labels)
   'platformAgent.device.online': 'Online',
@@ -767,7 +806,6 @@ export default {
   'platformAgent.create.versionTooLow': 'lh version is too low',
   'platformAgent.create.versionTooLowHint': 'Update lh to the latest version:',
   'platformAgent.create.upgradeCmd': 'npm install -g @lobehub/cli',
-  'platformAgent.create.comingSoon': 'Coming Soon',
 
   // Connect agent device guard banner
   'platformAgent.deviceGuard.deviceOffline.title': 'Device not connected',
@@ -1579,6 +1617,18 @@ export default {
   'workingPanel.resources.updatedAt': 'Updated {{time}}',
   'workingPanel.resources.viewMode.list': 'List view',
   'workingPanel.resources.viewMode.tree': 'Tree view',
+  'workingPanel.works.totalCost': 'Total cost: {{cost}}',
+  'workingPanel.works.versionCost': 'Version cost: {{cost}}',
+  'workingPanel.works.empty': 'No works in this conversation yet',
+  'workingPanel.works.emptyVersions': 'No versions yet',
+  'workingPanel.works.error': 'Failed to load works',
+  'workingPanel.works.changeType.created': 'Created',
+  'workingPanel.works.changeType.updated': 'Updated',
+  'workingPanel.works.taskDeleted': 'Task deleted',
+  'workingPanel.works.title': 'Works',
+  'workingPanel.works.versionError': 'Failed to load versions',
+  'workingPanel.works.viewMode.history': 'Version history',
+  'workingPanel.works.viewMode.summary': 'Summary cards',
   'workingPanel.localFile.binary': 'Binary file — preview unavailable',
   'workingPanel.localFile.close': 'Close',
   'workingPanel.localFile.closeLeft': 'Close to the Left',

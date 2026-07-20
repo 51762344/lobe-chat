@@ -78,6 +78,52 @@ describe('buildHeteroSpawnArgs', () => {
     expect(buildHeteroExecArgs(provider)).toEqual(['--agent-arg=--mode', '--agent-arg=high']);
   });
 
+  it('forwards OpenCode native args and an explicit provider/model selection', () => {
+    const provider: HeterogeneousProviderConfig = {
+      args: ['--variant', 'high'],
+      model: 'anthropic/claude-sonnet-4',
+      type: 'opencode',
+    };
+
+    expect(buildHeteroSpawnArgs(provider)).toEqual([
+      '--variant',
+      'high',
+      '--model',
+      'anthropic/claude-sonnet-4',
+    ]);
+    expect(buildHeteroExecArgs(provider)).toEqual([
+      '--agent-arg=--variant',
+      '--agent-arg=high',
+      '--model',
+      'anthropic/claude-sonnet-4',
+    ]);
+  });
+
+  it('does not duplicate an OpenCode model already present in native args', () => {
+    const provider: HeterogeneousProviderConfig = {
+      args: ['--model=google/gemini-2.5-pro'],
+      model: 'anthropic/claude-sonnet-4',
+      type: 'opencode',
+    };
+
+    expect(buildHeteroSpawnArgs(provider)).toEqual(['--model=google/gemini-2.5-pro']);
+    expect(buildHeteroExecArgs(provider)).toEqual(['--agent-arg=--model=google/gemini-2.5-pro']);
+  });
+
+  it('honors the OpenCode short model flag in native args', () => {
+    const provider: HeterogeneousProviderConfig = {
+      args: ['-m', 'google/gemini-2.5-pro'],
+      model: 'anthropic/claude-sonnet-4',
+      type: 'opencode',
+    };
+
+    expect(buildHeteroSpawnArgs(provider)).toEqual(['-m', 'google/gemini-2.5-pro']);
+    expect(buildHeteroExecArgs(provider)).toEqual([
+      '--agent-arg=-m',
+      '--agent-arg=google/gemini-2.5-pro',
+    ]);
+  });
+
   it('preserves Claude Code defaults when model/effort have not been selected', () => {
     expect(buildHeteroSpawnArgs({ type: 'claude-code' })).toBeUndefined();
     expect(buildHeteroSpawnArgs({ args: ['--verbose'], type: 'claude-code' })).toEqual([
@@ -390,6 +436,35 @@ describe('codex speed mode', () => {
 });
 
 describe('resolveAgencyConfig', () => {
+  it('ignores a member override when the shared execution target is fixed', () => {
+    const shared = {
+      boundDeviceId: 'fixed-device',
+      executionTargetSelectionPolicy: 'fixed' as const,
+      executionTarget: 'device' as const,
+    };
+
+    expect(
+      resolveAgencyConfig(shared, {
+        boundDeviceId: 'member-device',
+        executionTarget: 'sandbox',
+      }),
+    ).toEqual(shared);
+  });
+
+  it('keeps a fixed non-device target when a member requests a device', () => {
+    const shared = {
+      executionTarget: 'sandbox' as const,
+      executionTargetSelectionPolicy: 'fixed' as const,
+    };
+
+    expect(
+      resolveAgencyConfig(shared, {
+        boundDeviceId: 'member-device',
+        executionTarget: 'device',
+      }),
+    ).toEqual(shared);
+  });
+
   it('returns the shared config unchanged when override is null / undefined', () => {
     const shared = { boundDeviceId: 'ws-device', executionTarget: 'device' as const };
     expect(resolveAgencyConfig(shared, undefined)).toEqual(shared);
