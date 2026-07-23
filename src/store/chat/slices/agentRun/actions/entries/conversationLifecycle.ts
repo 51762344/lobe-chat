@@ -43,6 +43,7 @@ import { chatService } from '@/services/chat';
 import { resolveSelectedSkillsWithContent } from '@/services/chat/mecha/skillPreload';
 import { resolveSelectedToolsWithContent } from '@/services/chat/mecha/toolPreload';
 import { messageService } from '@/services/message';
+import { topicService } from '@/services/topic';
 import { getAgentStoreState, useAgentStore } from '@/store/agent';
 import {
   agentByIdSelectors,
@@ -76,6 +77,7 @@ import {
   hasRunningCompressionOperation,
 } from '@/store/chat/utils/compression';
 import { messageMapKey } from '@/store/chat/utils/messageMapKey';
+import { snapshotAgentModel } from '@/store/chat/utils/snapshotAgentModel';
 import { topicMapKey } from '@/store/chat/utils/topicMapKey';
 import { getElectronStoreState } from '@/store/electron';
 import { useGlobalStore } from '@/store/global';
@@ -99,6 +101,8 @@ import {
   parseSingleAgentMentionDirectRoute,
   processCommands,
 } from './commandBus';
+import { resolveExistingTopicForRun } from './resolveExistingTopic';
+
 /**
  * Extended params for sendMessage with context
  */
@@ -140,6 +144,9 @@ type SendMessageServerResponseMeta = SendMessageServerResponse & {
 interface OptimisticTopicPlaceholder {
   id: string;
   metadata?: ChatTopicMetadata;
+  /** Pinned model snapshot — top-level `topics.model` column, not metadata. */
+  model?: string;
+  provider?: string;
   title: string;
 }
 
@@ -594,9 +601,19 @@ export class ConversationLifecycleActionImpl {
     this.#get().associateMessageWithOperation(tempId, operationId);
     this.#get().associateMessageWithOperation(tempAssistantId, operationId);
 
-    const existingTopic = operationContext.topicId
-      ? topicSelectors.getTopicById(operationContext.topicId)(this.#get())
-      : undefined;
+    // The topic list store is paginated — a deep-linked older topic can be the
+    // ACTIVE topic yet miss `getTopicById`. For hetero runs that miss used to
+    // silently resolve the agent/device default cwd instead of the topic's
+    // bound workingDirectory and drop `--resume` (fresh CLI session, context
+    // lost, no error) — fall back to the server row.
+    const existingTopic = await resolveExistingTopicForRun({
+      fetchTopicDetail: (id) => topicService.getTopicDetail(id),
+      isHetero: !!heterogeneousProvider,
+      storeTopic: operationContext.topicId
+        ? topicSelectors.getTopicById(operationContext.topicId)(this.#get())
+        : undefined,
+      topicId: operationContext.topicId,
+    });
     const currentDeviceId = getElectronStoreState().gatewayDeviceInfo?.deviceId;
     // Resolve the cwd for every hetero-provider run that lands on a MACHINE
     // (in-process `hetero` runtime, or a gateway dispatch whose effective
@@ -665,6 +682,14 @@ export class ConversationLifecycleActionImpl {
       runtimeType === 'gateway' && !operationContext.topicId && operationContext.agentId
         ? getPendingTopicRepos(operationContext.agentId)
         : [];
+    // A topic created by this send pins the model it was started with, same as
+    // the manual createTopic/saveToTopic and Gateway (AiAgentService) paths. The
+    // snapshot goes to the top-level `topics.model`/`provider` columns (config
+    // source of truth) — generation and ChatInput display resolve from it
+    // (topicSelectors.getTopicModelById).
+    const newTopicModelSnapshot = !operationContext.topicId
+      ? snapshotAgentModel(operationContext.agentId)
+      : undefined;
     // Example: a pending repo topic without this metadata renders under "No directory"
     // until the server topic replaces `tmp_topic_*`.
     const optimisticTopicMetadata: ChatTopicMetadata | undefined =
@@ -686,6 +711,7 @@ export class ConversationLifecycleActionImpl {
         ? {
             id: `tmp_topic_${nanoid()}`,
             ...(optimisticTopicMetadata ? { metadata: optimisticTopicMetadata } : {}),
+            ...newTopicModelSnapshot,
             title: newTopicTitle,
           }
         : undefined;
@@ -708,7 +734,7 @@ export class ConversationLifecycleActionImpl {
       topicId: string,
       title: string,
       action: string,
-      metadata?: ChatTopicMetadata,
+      extra?: { metadata?: ChatTopicMetadata; model?: string; provider?: string },
     ) => {
       this.#get().internal_dispatchTopic(
         {
@@ -716,7 +742,8 @@ export class ConversationLifecycleActionImpl {
           type: 'addTopic',
           value: {
             id: topicId,
-            ...(metadata ? { metadata } : {}),
+            ...(extra?.metadata ? { metadata: extra.metadata } : {}),
+            ...(extra?.model ? { model: extra.model, provider: extra.provider } : {}),
             ...(operationContext.groupId ? {} : { sessionId: operationContext.agentId }),
             title,
           },
@@ -731,7 +758,11 @@ export class ConversationLifecycleActionImpl {
           topicId,
           title || t('defaultTitle', { ns: 'topic' }),
           'sendMessage/reconcileOptimisticTopic/add',
-          optimisticTopic?.metadata,
+          {
+            metadata: optimisticTopic?.metadata,
+            model: optimisticTopic?.model,
+            provider: optimisticTopic?.provider,
+          },
         );
         return;
       }
@@ -742,6 +773,9 @@ export class ConversationLifecycleActionImpl {
         previousId: optimisticTopic.id,
         value: {
           ...(optimisticTopic.metadata ? { metadata: optimisticTopic.metadata } : {}),
+          ...(optimisticTopic.model
+            ? { model: optimisticTopic.model, provider: optimisticTopic.provider }
+            : {}),
           ...(operationContext.groupId ? {} : { sessionId: operationContext.agentId }),
           title: title || t('defaultTitle', { ns: 'topic' }),
         },
@@ -771,7 +805,11 @@ export class ConversationLifecycleActionImpl {
         optimisticTopic.id,
         optimisticTopic.title,
         'sendMessage/optimisticCreateTopic',
-        optimisticTopic.metadata,
+        {
+          metadata: optimisticTopic.metadata,
+          model: optimisticTopic.model,
+          provider: optimisticTopic.provider,
+        },
       );
       this.#get().internal_updateTopicLoading(optimisticTopic.id, true);
       optimisticTopicActive = true;
@@ -816,6 +854,7 @@ export class ConversationLifecycleActionImpl {
                         ...(workingDirectoryConfig ? { workingDirectoryConfig } : {}),
                       }
                     : undefined,
+                  ...newTopicModelSnapshot,
                   title: newTopicTitle,
                   topicMessageIds: messages.map((m) => m.id),
                 }
@@ -981,9 +1020,14 @@ export class ConversationLifecycleActionImpl {
         // resume. `resolveHeteroResume` drops the sessionId when the saved cwd
         // doesn't match the current one, so CC doesn't emit
         // "No conversation found with session ID".
-        const topic = heteroContext.topicId
-          ? topicSelectors.getTopicById(heteroContext.topicId)(this.#get())
-          : undefined;
+        // Store lookup first (freshest optimistic edits), but fall back to the
+        // server row resolved above — the paginated store misses deep-linked
+        // older topics, and a miss here silently dropped `--resume` even when
+        // the cwd resolution already used the topic's bound workingDirectory.
+        const topic =
+          (heteroContext.topicId
+            ? topicSelectors.getTopicById(heteroContext.topicId)(this.#get())
+            : undefined) ?? existingTopic;
         const { cwdChanged, resumeSessionId } = resolveHeteroResume(
           topic?.metadata,
           workingDirectory,
@@ -1196,6 +1240,7 @@ export class ConversationLifecycleActionImpl {
             : undefined,
           newTopic: !topicId
             ? {
+                ...newTopicModelSnapshot,
                 topicMessageIds: forceNewTopicFromExisting ? [] : messages.map((m) => m.id),
                 title: newTopicTitle,
               }
