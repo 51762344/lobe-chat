@@ -19,6 +19,7 @@ import {
 } from '@/business/client/BusinessDesktopRoutes';
 import { agentDocumentRouteMeta } from '@/features/AgentDocumentPage/routeMeta';
 import { taskRouteMeta, tasksRouteMeta } from '@/features/AgentTasks/routeMeta';
+import { agentsRouteMeta } from '@/features/AgentViewAll/routeMeta';
 import { pageRouteMeta } from '@/features/Pages/routeMeta';
 import {
   acceptanceRouteMeta,
@@ -653,6 +654,19 @@ export const sharedMainAreaChildren: RouteObject[] = [
     path: 'eval',
   },
 
+  // Agents view-all route (flat list of workspace/private agents)
+  {
+    children: [
+      {
+        element: dynamicElement(() => import('@/routes/(main)/agents'), 'Desktop > Agents'),
+        handle: { meta: agentsRouteMeta },
+        index: true,
+      },
+    ],
+    errorElement: <ErrorBoundary resetPath=".." />,
+    path: 'agents',
+  },
+
   // Task workspace routes (cross-agent)
   {
     children: [
@@ -862,6 +876,13 @@ export const desktopRoutes: RouteObject[] = [
                       'Desktop > Workspace > Settings > Members',
                     ),
                     path: 'members',
+                  },
+                  {
+                    element: dynamicElement(
+                      () => import('@/routes/(main)/[workspaceSlug]/settings/notification'),
+                      'Desktop > Workspace > Settings > Notification',
+                    ),
+                    path: 'notification',
                   },
                   {
                     element: dynamicElement(
@@ -1089,6 +1110,14 @@ export const desktopRoutes: RouteObject[] = [
         ),
         handle: { meta: acceptanceRouteMeta },
         path: ':acceptanceId',
+      },
+      {
+        element: dynamicElement(
+          () => import('@/routes/acceptance/[acceptanceId]'),
+          'Desktop > AcceptanceCheck',
+        ),
+        handle: { meta: acceptanceRouteMeta },
+        path: ':acceptanceId/check/:checkId',
       },
     ],
     element: dynamicElement(() => import('@/routes/(main)/acceptance'), 'Desktop > Acceptance'),

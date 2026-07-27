@@ -214,6 +214,18 @@ export const sharedMainAreaChildren: RouteObject[] = [
     path: 'community',
   },
 
+  // Agents view-all route (flat list of workspace/private agents)
+  {
+    children: [
+      {
+        element: dynamicElement(() => import('@/routes/(main)/agents'), 'Mobile > Agents'),
+        index: true,
+      },
+    ],
+    errorElement: <ErrorBoundary resetPath=".." />,
+    path: 'agents',
+  },
+
   // Task workspace routes (cross-agent)
   {
     children: [
@@ -435,6 +447,13 @@ export const mobileRoutes: RouteObject[] = [
               },
               {
                 element: dynamicElement(
+                  () => import('@/routes/(main)/[workspaceSlug]/settings/notification'),
+                  'Mobile > Workspace > Settings > Notification',
+                ),
+                path: 'notification',
+              },
+              {
+                element: dynamicElement(
                   () => import('@/routes/(main)/[workspaceSlug]/settings/plans'),
                   'Mobile > Workspace > Settings > Plans',
                 ),
@@ -607,5 +626,14 @@ export const mobileRoutes: RouteObject[] = [
     errorElement: <ErrorBoundary />,
     handle: { meta: acceptanceRouteMeta },
     path: '/acceptance/:acceptanceId',
+  },
+  {
+    element: dynamicElement(
+      () => import('@/routes/acceptance/[acceptanceId]'),
+      'Mobile > AcceptanceCheck',
+    ),
+    errorElement: <ErrorBoundary />,
+    handle: { meta: acceptanceRouteMeta },
+    path: '/acceptance/:acceptanceId/check/:checkId',
   },
 ];
