@@ -104,7 +104,7 @@ export default {
   'acceptance.checkWork.copied': 'Check-specific instruction copied',
   'acceptance.checkWork.copy': 'Copy check instruction',
   'acceptance.checkWork.description':
-    'Send this check, its evidence, and its feedback to the source conversation as one bounded work item.',
+    'Copy a focused prompt with this check, its evidence, and its feedback, then paste it to an AI agent.',
   'acceptance.checkWork.drafted': 'Check-specific instruction drafted',
   'acceptance.checkWork.sent': 'This check was sent to the source conversation',
   'acceptance.checkWork.title': 'Work on this check',
@@ -228,6 +228,7 @@ export default {
   'acceptance.status.repairing': 'Repair in progress',
   'acceptance.status.verifying': 'Verification in progress',
   'acceptance.subject.document': 'Document',
+  'acceptance.subject.standalone': 'Standalone',
   'acceptance.subject.task': 'Task',
   'acceptance.subject.topic': 'Topic',
   'acceptance.tray.addCheck': 'Add tracking item',

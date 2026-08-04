@@ -3,12 +3,12 @@
 import { chainSummaryTitle } from '@lobechat/prompts';
 import { type ChatTopicMetadata, type MessageMapScope, type UIChatMessage } from '@lobechat/types';
 import { TraceNameMap } from '@lobechat/types';
+import { toast } from '@lobehub/ui/base-ui';
 import isEqual from 'fast-deep-equal';
 import { t } from 'i18next';
 import { type SWRResponse } from 'swr';
 import useSWR from 'swr';
 
-import { message } from '@/components/AntdStaticMethods';
 import { LOADING_FLAT } from '@/const/message';
 import { mutate, useClientDataSWRWithSync } from '@/libs/swr';
 import { cronKeys, deviceKeys, topicKeys } from '@/libs/swr/keys';
@@ -57,6 +57,13 @@ const n = setNamespace('t');
 
 const STALE_RUNNING_TOPIC_TIMEOUT = 2 * 60 * 60 * 1000;
 const STALE_RUNNING_TOPIC_QUERY_PAGE_SIZE = 500;
+
+/**
+ * Max message prefetches fired per topic-list fetch for freshly-unread topics.
+ * Bounds the fan-out after a long-offline boot; see
+ * `#prefetchUnreadTopicMessages`.
+ */
+const UNREAD_TOPIC_PREFETCH_LIMIT = 5;
 
 type CronTopicsGroupWithJobInfo = {
   cronJob: unknown;
@@ -242,16 +249,12 @@ export class ChatTopicActionImpl {
 
     const newTitle = t('duplicateTitle', { ns: 'chat', title: topic?.title });
 
-    message.loading({
-      content: t('duplicateLoading', { ns: 'topic' }),
-      key: 'duplicateTopic',
-      duration: 0,
-    });
+    const loadingToast = toast.loading(t('duplicateLoading', { ns: 'topic' }));
 
     const newTopicId = await topicService.cloneTopic(id, newTitle);
     await refreshTopic();
-    message.destroy('duplicateTopic');
-    message.success(t('duplicateSuccess', { ns: 'topic' }));
+    loadingToast.close();
+    toast.success(t('duplicateSuccess', { ns: 'topic' }));
 
     await switchTopic(newTopicId);
   };
@@ -261,11 +264,7 @@ export class ChatTopicActionImpl {
 
     if (!activeAgentId) return;
 
-    message.loading({
-      content: t('importLoading', { ns: 'topic' }),
-      duration: 0,
-      key: 'importTopic',
-    });
+    const loadingToast = toast.loading(t('importLoading', { ns: 'topic' }));
 
     try {
       const result = await topicService.importTopic({
@@ -275,15 +274,15 @@ export class ChatTopicActionImpl {
       });
 
       await refreshTopic();
-      message.destroy('importTopic');
-      message.success(t('importSuccess', { count: result.messageCount, ns: 'topic' }));
+      loadingToast.close();
+      toast.success(t('importSuccess', { count: result.messageCount, ns: 'topic' }));
 
       await switchTopic(result.topicId);
 
       return result.topicId;
     } catch (error) {
-      message.destroy('importTopic');
-      message.error(t('importError', { ns: 'topic' }));
+      loadingToast.close();
+      toast.error(t('importError', { ns: 'topic' }));
       console.error('[importTopic] Failed:', error);
       return undefined;
     }
@@ -466,6 +465,50 @@ export class ChatTopicActionImpl {
     }
 
     return next;
+  };
+
+  /**
+   * Warm the message cache for topics whose status just flipped to `unread` in
+   * a fetched topic list — i.e. runs that completed remotely / on another
+   * device / while the app was closed. Their local message bucket typically
+   * holds only the creation-time seed (the first user message), so without a
+   * prefetch the first click renders that partial list until the switch-time
+   * revalidation lands.
+   *
+   * Store-level on purpose: the sidebar item's own unread-prefetch effect only
+   * fires while that item is MOUNTED, which misses collapsed groups and rows
+   * outside the virtualized viewport. Locally-run topics don't need this path —
+   * streaming already filled their bucket, and `prefetchMessages`' running
+   * guard skips them while the terminal bookkeeping is still in flight.
+   *
+   * Capped so a boot after days offline doesn't fan out a request storm; the
+   * uncapped remainder still self-heals on click via the switch revalidation.
+   * `prefetchMessages` itself dedupes concurrent calls and skips
+   * server-verified or running contexts, so repeated onData fires are cheap.
+   */
+  #prefetchUnreadTopicMessages = (
+    fetchedTopics: ChatTopic[],
+    previousItems: ChatTopic[] | undefined,
+    context: { agentId?: string | null; groupId?: string | null },
+  ): void => {
+    // Message buckets for group scopes key on more than agentId/topicId; the
+    // canonical message:list prefetch only represents plain agent topics.
+    if (!context.agentId || context.groupId) return;
+
+    const previousStatus = new Map(previousItems?.map((item) => [item.id, item.status]) ?? []);
+    // First load (no previous items) sweeps every unread topic — those runs
+    // finished while the app was closed and nothing else will warm them.
+    const flipped = fetchedTopics.filter(
+      (item) => item.status === 'unread' && previousStatus.get(item.id) !== 'unread',
+    );
+
+    for (const topic of flipped.slice(0, UNREAD_TOPIC_PREFETCH_LIMIT)) {
+      void this.#get().prefetchMessages({
+        agentId: context.agentId,
+        scope: 'main',
+        topicId: topic.id,
+      });
+    }
   };
 
   /**
@@ -825,6 +868,11 @@ export class ChatTopicActionImpl {
 
           const currentData = this.#get().topicDataMap[containerKey];
           const topics = this.#reconcileFetchedTopics(result.items, currentData?.items);
+
+          // Fire BEFORE the no-change early return below: on a cold boot the
+          // cached list arrives with no `currentData`, and that first delivery
+          // is exactly the sweep that must warm app-closed-while-running runs.
+          this.#prefetchUnreadTopicMessages(topics, currentData?.items, { agentId, groupId });
 
           const isRefreshingExpandedList =
             !!currentData &&

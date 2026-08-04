@@ -11,7 +11,7 @@ import { useTranslation } from 'react-i18next';
 
 import ChatInputNotice from '@/features/ChatInput/ChatInputNotice';
 import { useChatInputStore } from '@/features/ChatInput/store';
-import { LayoutContainerContext } from '@/routes/(main)/_layout/DesktopLayoutContainer/LayoutContainerContext';
+import { LayoutContainerContext } from '@/features/DesktopLayoutContainer/LayoutContainerContext';
 import { useChatStore } from '@/store/chat';
 import { chatSelectors } from '@/store/chat/selectors';
 import { fileChatSelectors, useFileStore } from '@/store/file';
@@ -147,6 +147,10 @@ const DesktopChatInput = memo<DesktopChatInputProps>(
 
     const chatKey = useChatStore(chatSelectors.currentChatKey);
 
+    // The ControlBar (or the custom slot standing in for it) hosts the
+    // context-window token tag; without one, SendArea keeps it beside Send.
+    const hasControlBar = Boolean(controlBarSlot) || showControlBar;
+
     const setExpand = useChatInputStore((s) => s.setExpand);
     const skillDrop = useSkillDrop();
     const topicDrop = useTopicDrop();
@@ -238,10 +242,10 @@ const DesktopChatInput = memo<DesktopChatInputProps>(
                   (sendAreaPrefix ? (
                     <Flexbox horizontal align={'center'} gap={6}>
                       {sendAreaPrefix}
-                      <SendArea />
+                      <SendArea hideContextWindow={hasControlBar} />
                     </Flexbox>
                   ) : (
-                    <SendArea />
+                    <SendArea hideContextWindow={hasControlBar} />
                   ))
                 }
               />

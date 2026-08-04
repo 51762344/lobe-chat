@@ -33,10 +33,22 @@ describe('recentKeys', () => {
       'user-1:workspace-1',
     ]);
   });
+
+  // Regression: `recent:topicList` had no CACHE_TIERS entry of its own, and the
+  // provider matches patterns as substrings — so `recent:list` never covered it.
+  // The Home recents list was memory-only and flashed a skeleton on every boot.
+  it('routes the Home topic-only recents key to a persisted cache tier', () => {
+    const serialized = unstable_serialize(recentKeys.topicList(9, 'user-1:workspace-1'));
+    const persisted = [...CACHE_TIERS.idb, ...CACHE_TIERS.local].some((pattern) =>
+      serialized.includes(pattern),
+    );
+
+    expect(persisted).toBe(true);
+  });
 });
 
 describe('taskKeys', () => {
-  // Regression for LOBE-12552: the sidebar task list used a `sidebar:` domain
+  // Regression for sidebar task list cache persists across navigation to skip skeleton: the sidebar task list used a `sidebar:` domain
   // key that no CACHE_TIERS pattern matched, so it was memory-only and every
   // fresh page load showed a skeleton. The key must route to a persisted tier
   // (the provider matches patterns against the serialized SWR key).

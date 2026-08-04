@@ -11,6 +11,7 @@ import GroupBlock from '@/features/Home/components/GroupBlock';
 import { homeType } from '@/features/Home/components/homeType';
 import RailCard from '@/features/Home/components/RailCard';
 import Recommendations, { useRecommendationsVisible } from '@/features/Recommendations';
+import { useCacheScope } from '@/libs/swr/useCacheScope';
 import { useBriefStore } from '@/store/brief';
 import { briefListSelectors } from '@/store/brief/selectors';
 import { useUserStore } from '@/store/user';
@@ -20,8 +21,9 @@ import InboxBriefCard from './InboxBriefCard';
 import MarkAllReadButton from './MarkAllReadButton';
 import NeedsYouRailCard from './NeedsYouRailCard';
 import NewsList from './NewsList';
+import { ownsRailSections } from './railSectionPlacement';
 import RunningTasksCard from './RunningTasksCard';
-import { resolveScopeToggleSection } from './scopeTogglePlacement';
+import { filterTopicsForInboxScope, resolveScopeToggleSection } from './scopeTogglePlacement';
 import { splitBriefs } from './splitBriefs';
 import UnreadTopicList from './UnreadTopicList';
 import { useHomeInboxTopics } from './useHomeInboxTopics';
@@ -78,19 +80,33 @@ interface InboxSection {
  * count, and one absent section never hides another's heading.
  */
 interface HomeInboxProps {
-  variant?: 'default' | 'rail';
+  hideNeedsYou?: boolean;
+  hideUnread?: boolean;
+  /**
+   * Main column only: the rail is collapsed, so the sections it owns (running,
+   * news) fold into this column instead of disappearing with it.
+   */
+  inlineRail?: boolean;
+  variant?: 'default' | 'main' | 'rail';
 }
 
-const HomeInbox = memo<HomeInboxProps>(({ variant = 'default' }) => {
+const HomeInbox = memo<HomeInboxProps>((props) => {
+  const { hideNeedsYou, hideUnread, inlineRail, variant = 'default' } = props;
   const isRail = variant === 'rail';
+  const isMain = variant === 'main';
+  const showRailSections = ownsRailSections({ inlineRail, variant });
   const { t } = useTranslation('home');
   const isLogin = useUserStore(authSelectors.isLogin);
   const myId = useUserStore(userProfileSelectors.userId);
 
+  // Briefs are per-user AND per-workspace rows, so the feed is read through the
+  // active cache scope — a list left over from the previous workspace holds ids
+  // this one cannot resolve, and every action on it would fail silently.
+  const cacheScope = useCacheScope();
   const useFetchBriefs = useBriefStore((s) => s.useFetchBriefs);
-  const briefsSWR = useFetchBriefs(isLogin);
-  const briefs = useBriefStore(briefListSelectors.briefs);
-  const isBriefsInit = useBriefStore(briefListSelectors.isBriefsInit);
+  const briefsSWR = useFetchBriefs(isLogin, cacheScope);
+  const briefs = useBriefStore(briefListSelectors.briefs(cacheScope));
+  const isBriefsInit = useBriefStore(briefListSelectors.isBriefsInit(cacheScope));
 
   const topics = useHomeInboxTopics(isLogin);
   const recommendationsVisible = useRecommendationsVisible();
@@ -110,11 +126,11 @@ const HomeInbox = memo<HomeInboxProps>(({ variant = 'default' }) => {
   // own runs, "team" is everyone's. Personal mode has only the viewer's, so the
   // filter is a no-op there.
   const unreadTopics = useMemo(
-    () => (teamView ? topics.unread : topics.unread.filter((topic) => topic.userId === myId)),
+    () => filterTopicsForInboxScope(topics.unread, myId, teamView),
     [teamView, topics.unread, myId],
   );
   const runningTopics = useMemo(
-    () => (teamView ? topics.running : topics.running.filter((topic) => topic.userId === myId)),
+    () => filterTopicsForInboxScope(topics.running, myId, teamView),
     [teamView, topics.running, myId],
   );
 
@@ -122,7 +138,7 @@ const HomeInbox = memo<HomeInboxProps>(({ variant = 'default' }) => {
 
   // The brief feed is the primary content; a first-load failure blocks the whole
   // surface. No fabricated section heading — we don't know what's under it yet.
-  if (briefsSWR.error && !isBriefsInit && !briefsSWR.isLoading) {
+  if (!isMain && briefsSWR.error && !isBriefsInit && !briefsSWR.isLoading) {
     return (
       <AsyncError
         error={briefsSWR.error}
@@ -136,7 +152,7 @@ const HomeInbox = memo<HomeInboxProps>(({ variant = 'default' }) => {
 
   // First load: bare skeletons, no group heading (loading must not assert a
   // "Needs you" section that may turn out empty). Recommendations keep their own.
-  if (!isBriefsInit) {
+  if (!isMain && !isBriefsInit) {
     return (
       <Flexbox gap={12}>
         <BriefCardSkeleton />
@@ -162,9 +178,10 @@ const HomeInbox = memo<HomeInboxProps>(({ variant = 'default' }) => {
   ) : undefined;
   const toggleSectionKey = scopeToggle
     ? resolveScopeToggleSection({
-        hasNeedsYou: needsYou.length > 0,
+        hasNeedsYou: !hideNeedsYou && needsYou.length > 0,
         hasRunning: runningTopics.length > 0,
-        hasUnread: unreadTopics.length > 0,
+        hasUnread: !hideUnread && unreadTopics.length > 0,
+        preferUnread: isMain,
       })
     : null;
   const placeToggle = (key: typeof toggleSectionKey): ReactNode =>
@@ -172,7 +189,7 @@ const HomeInbox = memo<HomeInboxProps>(({ variant = 'default' }) => {
 
   const sections: InboxSection[] = [];
 
-  if (needsYou.length > 0)
+  if (!isMain && !hideNeedsYou && needsYou.length > 0)
     sections.push(
       // The rail paginates instead of stacking and owns its header. Keep the
       // page-level scope control in that header alongside the pager.
@@ -206,7 +223,7 @@ const HomeInbox = memo<HomeInboxProps>(({ variant = 'default' }) => {
       node: <AsyncError error={topics.error} variant={'inline'} onRetry={topics.reload} />,
     });
 
-  if (unreadTopics.length > 0)
+  if (!hideUnread && unreadTopics.length > 0)
     sections.push({
       action: placeToggle('unread'),
       count: unreadTopics.length,
@@ -222,8 +239,40 @@ const HomeInbox = memo<HomeInboxProps>(({ variant = 'default' }) => {
       ),
     });
 
+  if (isMain) {
+    if (briefsSWR.error && !isBriefsInit && !briefsSWR.isLoading) {
+      sections.push({
+        key: 'needsYou-error',
+        label: t('inbox.needsYou.title'),
+        node: (
+          <AsyncError
+            error={briefsSWR.error}
+            variant={'inline'}
+            onRetry={() => void briefsSWR.mutate()}
+          />
+        ),
+      });
+    } else if (!isBriefsInit) {
+      sections.push({ key: 'needsYou-loading', node: <BriefCardSkeleton /> });
+    } else if (!hideNeedsYou && needsYou.length > 0) {
+      sections.push({
+        action: placeToggle('needsYou'),
+        count: needsYou.length,
+        key: 'needsYou',
+        label: t('inbox.needsYou.title'),
+        node: (
+          <Flexbox gap={12}>
+            {needsYou.map((brief) => (
+              <InboxBriefCard brief={brief} key={brief.id} />
+            ))}
+          </Flexbox>
+        ),
+      });
+    }
+  }
+
   // No title: the card already says "3 tasks running" on its own head.
-  if (runningTopics.length > 0)
+  if (showRailSections && runningTopics.length > 0)
     sections.push({
       key: 'running',
       node: (
@@ -236,7 +285,7 @@ const HomeInbox = memo<HomeInboxProps>(({ variant = 'default' }) => {
       ),
     });
 
-  if (news.length > 0)
+  if (showRailSections && news.length > 0)
     sections.push({
       action: <MarkAllReadButton news={news} />,
       // Team view: News is still only mine (briefs are per-user), so say so
@@ -252,6 +301,8 @@ const HomeInbox = memo<HomeInboxProps>(({ variant = 'default' }) => {
     });
 
   if (sections.length === 0) {
+    if (isMain) return null;
+
     if (isRail)
       return (
         <Flexbox gap={12}>
@@ -320,7 +371,7 @@ const HomeInbox = memo<HomeInboxProps>(({ variant = 'default' }) => {
         );
       })}
 
-      <Recommendations variant={variant} />
+      {!isMain && <Recommendations variant={variant} />}
     </Flexbox>
   );
 });
