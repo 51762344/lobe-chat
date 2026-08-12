@@ -1,5 +1,5 @@
 import type { QueryFileListParams } from '@lobechat/types';
-import { FilesTabs, SortType } from '@lobechat/types';
+import { FilesTabs, LIBRARY_HIDDEN_FILE_SOURCES, SortType } from '@lobechat/types';
 import {
   and,
   asc,
@@ -12,6 +12,7 @@ import {
   like,
   ne,
   notExists,
+  notInArray,
   or,
   sql,
   sum,
@@ -224,6 +225,39 @@ export class FileModel {
     return await (trx ? executeInTransaction(trx) : this.db.transaction(executeInTransaction));
   };
 
+  /**
+   * Delete a transient upload only while no persisted message or session references it.
+   * Locking the file row serializes this cleanup with foreign-key inserts, so a late send either
+   * wins ownership and preserves the file or observes the deletion and fails atomically.
+   */
+  deleteUnreferenced = async (id: string, removeGlobalFile: boolean = true) => {
+    return this.db.transaction(async (trx) => {
+      const [file] = await trx
+        .select({ id: files.id })
+        .from(files)
+        .where(and(eq(files.id, id), this.ownership()))
+        .limit(1)
+        .for('update');
+      if (!file) return;
+
+      const [messageReference] = await trx
+        .select({ id: messagesFiles.fileId })
+        .from(messagesFiles)
+        .where(eq(messagesFiles.fileId, id))
+        .limit(1);
+      if (messageReference) return;
+
+      const [sessionReference] = await trx
+        .select({ id: filesToSessions.fileId })
+        .from(filesToSessions)
+        .where(eq(filesToSessions.fileId, id))
+        .limit(1);
+      if (sessionReference) return;
+
+      return this.delete(id, removeGlobalFile, trx);
+    });
+  };
+
   deleteGlobalFile = async (hashId: string) => {
     return this.db.delete(globalFiles).where(eq(globalFiles.hashId, hashId));
   };
@@ -342,6 +376,10 @@ export class FileModel {
       q ? ilike(files.name, `%${q}%`) : undefined,
       this.ownership(callerAgentVisibility),
       visibility ? eq(files.visibility, visibility) : undefined,
+      // Artifacts owned by another surface (acceptance evidence) stay reachable
+      // by id, but never appear in a listing. Applied here rather than in
+      // `ownership()` so single-row reads and deletes still resolve them.
+      or(isNull(files.source), notInArray(files.source, LIBRARY_HIDDEN_FILE_SOURCES)),
     );
     if (category && category !== FilesTabs.All && category !== FilesTabs.Home) {
       const categoryFilter = buildFileCategoryFilter(files.fileType, category as FilesTabs);

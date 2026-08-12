@@ -4,6 +4,7 @@ export default {
   'audioPlayer.download': 'Download audio',
   'audioPlayer.pause': 'Pause audio',
   'audioPlayer.play': 'Play audio',
+  'audioPlayer.seek': 'Seek audio',
   'agentBuilder.installPlugin.authRequired': 'Cloud MCP requires sign-in to continue',
   'agentBuilder.installPlugin.cancel': 'Cancel',
   'agentBuilder.installPlugin.clickApproveToConnect':
@@ -518,6 +519,15 @@ export default {
   'heteroAgent.executionTarget.loading': 'Loading devices…',
   'heteroAgent.executionTarget.local': 'Local device',
   'heteroAgent.executionTarget.localDesc': 'Run as a local process on this desktop app',
+  'heteroAgent.executionTarget.localSandbox': 'Local sandbox',
+  'heteroAgent.executionTarget.localSandboxDesc':
+    'Run on this computer, with commands limited to the working directory and no network',
+  'heteroAgent.executionTarget.localSandboxDescNetwork':
+    'Run on this computer, with commands limited to the working directory and to common developer domains',
+  'heteroAgent.executionTarget.localSandboxSetUp': 'Set up',
+  'heteroAgent.executionTarget.localSandboxNetworkTip':
+    'Let sandboxed commands reach package registries and source forges — npm, PyPI, crates.io, RubyGems, Go, GitHub, GitLab. Every other domain stays blocked; the sandbox cannot open the network entirely.',
+  'heteroAgent.executionTarget.localSandboxUnavailable': 'Not available on this device: {{reason}}',
   'heteroAgent.executionTarget.manage': 'Manage',
   'heteroAgent.executionTarget.noDevices':
     'No remote devices yet. Run `lh connect` on another machine to add one.',
@@ -603,6 +613,7 @@ export default {
   'knowledgeBase.library.title': 'Files / Libraries',
   'knowledgeBase.files': 'Files',
   'knowledgeBase.libraries': 'Libraries',
+  'knowledgeBase.related.browse': 'Choose Files / Libraries',
   'knowledgeBase.related.empty': 'No related files or libraries',
   'knowledgeBase.relativeFilesOrLibraries': 'Related Files/Libraries',
   'knowledgeBase.title': 'Library',
@@ -883,8 +894,8 @@ export default {
   'newOpenCodeAgent': 'Add OpenCode',
   'newPiAgent': 'Add Pi',
   'newQoderAgent': 'Add Qoder',
-  'newPlatformAgent': 'Connect an Agent',
-  'newPlatformAgentDesc': 'Connect Claude Code, Codex, Hermes, OpenClaw, and other agents',
+  'newPlatformAgent': 'Connect External Agents',
+  'newPlatformAgentDesc': 'Connect Claude Code, OpenClaw, and other agents',
   'newGroupChat': 'Create Group',
   'agent.publishToWorkspace': 'Publish to Workspace',
   'agent.publishToWorkspaceErrorFixedPrivateDevice':
@@ -1546,9 +1557,8 @@ export default {
     'At least 20 ideas, each with a headline, an angle and a target reader, deduped and excluding anything already published.',
   'goalEmpty.examples.metric.tag': 'Reach a target count',
   'goalEmpty.examples.metric.title': 'Build up 20 workable article ideas for the newsletter',
-  'goalEmpty.examples.requirementPrefix': 'Done when: {{requirement}}',
-  'goalEmpty.examplesHint': 'Click to prefill',
-  'goalEmpty.examplesTitle': 'Start from an example',
+  'goalEmpty.examplesTitle': 'Examples',
+  'goalEmpty.howHint': 'How it works',
   'goalEmpty.howTitle': 'What happens after you create one',
   'goalEmpty.judge.bad':
     '“Keep an eye on competitors” — that is an activity, not an outcome. The agent can never tell when it is done.',
@@ -1908,6 +1918,36 @@ export default {
     'Unsupported file type: {{files}}. Supported images: JPG, PNG, GIF, WebP. Supported documents include PDF, Word, Excel, PowerPoint, Markdown, text, CSV, JSON, and code files.',
   'upload.validation.videoSizeExceeded':
     'Video file size must not exceed {{maxSize}}. Current file size is {{actualSize}}.',
+  'voiceMessage.action': 'Send voice message',
+  'voiceMessage.cancel': 'Cancel recording',
+  'voiceMessage.cancelUpload': 'Cancel voice message upload',
+  'voiceMessage.delete': 'Delete recording',
+  'voiceMessage.duration': 'Recording duration: {{duration}}',
+  'voiceMessage.error.not_supported':
+    'Voice recording is not supported in this browser. Try the latest Chrome or Safari.',
+  'voiceMessage.error.permission_denied':
+    'Microphone access is blocked. Allow it in browser site settings, then retry.',
+  'voiceMessage.error.recording_failed': 'Recording failed. Check your microphone and retry.',
+  'voiceMessage.otherAudioModeActive': 'Finish the other microphone session first.',
+  'voiceMessage.ready': 'Recording ready to send',
+  'voiceMessage.recording': 'Recording voice message',
+  'voiceMessage.requesting': 'Requesting microphone access…',
+  'voiceMessage.replyInProgress':
+    'Wait for the current response to finish before recording another voice message.',
+  'voiceMessage.retry': 'Retry voice message',
+  'voiceMessage.send': 'Send voice message',
+  'voiceMessage.statusLabel': 'Voice message recorder',
+  'voiceMessage.status.sendFailed': 'Send failed',
+  'voiceMessage.status.sending': 'Sending…',
+  'voiceMessage.status.unsupported': 'Switch models to retry',
+  'voiceMessage.status.uploadFailed': 'Upload failed',
+  'voiceMessage.status.uploading': 'Uploading… {{progress}}%',
+  'voiceMessage.stopping': 'Finishing recording…',
+  'voiceMessage.tooShort': 'Record for at least {{duration}} ms',
+  'voiceMessage.unsupported':
+    'The current model or Agent cannot accept original audio. Switch to an audio-capable model.',
+  'voiceMessage.uploadFailed': 'Upload failed. The recording is kept locally.',
+  'voiceMessage.uploading': 'Uploading voice message…',
   'viewMode.fullWidth': 'Full Width',
   'viewMode.normal': 'Standard',
   'viewMode.wideScreen': 'Widescreen',
