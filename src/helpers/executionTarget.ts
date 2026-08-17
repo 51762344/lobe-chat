@@ -81,7 +81,8 @@ export interface ResolveExecutionTargetOptions {
   isHetero?: boolean;
   /**
    * Whether this heterogeneous provider can execute in the server cloud
-   * sandbox. Defaults to `false` for Amp, OpenCode, Pi, and Qoder (which currently
+   * sandbox. Defaults to `false` for Amp, CodeBuddy, OpenCode, Pi, and Qoder
+   * (which currently
    * require a local or connected device) and `true` otherwise. Callers that only
    * know the provider through a legacy model discriminator can override the
    * inferred capability.
@@ -114,11 +115,15 @@ export interface ResolveExecutionTargetOptions {
 /** Whether a heterogeneous provider can run in LobeHub's cloud sandbox. */
 export const isHeterogeneousSandboxExecutionAvailable = (type: string | undefined): boolean =>
   type !== 'amp' &&
+  type !== 'codebuddy' &&
+  type !== 'cursor' &&
+  type !== 'kimi-code' &&
   type !== 'hermes' &&
   type !== 'opencode' &&
   type !== 'openclaw' &&
   type !== 'pi' &&
-  type !== 'qoder';
+  type !== 'qoder' &&
+  type !== 'trae';
 
 /**
  * Single source of truth for where an agent executes — one global
