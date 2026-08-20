@@ -22,11 +22,18 @@ class ExpertiseService {
 
   getLesson = async (lessonId: string) => lambdaClient.expertise.getLesson.query({ lessonId });
 
-  draftDomain = async (params: { agentId: string; brief: string }) =>
-    lambdaClient.expertise.draftDomain.mutate(params);
+  draftDomain = async (params: {
+    adjustment?: string;
+    agentId: string;
+    brief: string;
+    currentDraft?: ExpertiseDomainDraft;
+  }) => lambdaClient.expertise.draftDomain.mutate(params);
 
   createDomain = async (params: ExpertiseDomainDraft & { agentId: string; brief: string }) =>
     lambdaClient.expertise.createDomain.mutate(params);
+
+  deleteDomain = async (domainId: string) =>
+    lambdaClient.expertise.deleteDomain.mutate({ domainId });
 
   countHistory = async (agentId: string) => lambdaClient.expertise.countHistory.query({ agentId });
 

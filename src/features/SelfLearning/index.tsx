@@ -1,9 +1,10 @@
 'use client';
 
-import { Block, Center, Empty, Flexbox, Text } from '@lobehub/ui';
-import { Button, toast } from '@lobehub/ui/base-ui';
+import { ActionIcon, Block, Center, Empty, Flexbox, Icon, Text } from '@lobehub/ui';
+import type { DropdownItem } from '@lobehub/ui/base-ui';
+import { Button, confirmModal, DropdownMenu, toast } from '@lobehub/ui/base-ui';
 import { createStaticStyles } from 'antd-style';
-import { GraduationCapIcon, HistoryIcon, PlusIcon } from 'lucide-react';
+import { DnaIcon, HistoryIcon, MoreHorizontalIcon, PlusIcon, Trash2Icon } from 'lucide-react';
 import { memo, useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router';
@@ -19,7 +20,6 @@ import type { ExpertiseDomainItem } from '@/services/expertise';
 import { expertiseService } from '@/services/expertise';
 import { useAgentStore } from '@/store/agent';
 
-import { openCreateDomainModal } from './CreateDomainModal';
 import { countTiers, habitTier } from './helpers';
 import { useExpertiseOverview, useHistoryCount } from './hooks';
 import AnchorCard from './Portrait/AnchorCard';
@@ -66,8 +66,6 @@ const SelfLearning = memo(() => {
     activeAgentId ?? undefined,
     warmup.refreshInterval,
   );
-  const { data: history } = useHistoryCount(activeAgentId ?? undefined);
-
   const allDomains = useMemo(() => data?.domains ?? [], [data]);
   const scoped = useMemo(
     () => (domainId ? allDomains.filter((d) => d.id === domainId) : allDomains),
@@ -140,10 +138,17 @@ const SelfLearning = memo(() => {
     .filter(Boolean)
     .join(' · ');
 
-  // The warm-up card is front and centre only for a direction that has never been practiced.
-  const freshDomain = scoped.find((d) => d.runCount === 0 && d.lessons.length === 0);
-  const showWarmup = warmup.phase !== 'idle' || !!freshDomain;
-  const warmupTitle = freshDomain?.title ?? current?.title ?? scoped[0]?.title ?? '';
+  // The warm-up card is front and centre only for directions that have never been practiced.
+  const freshDomains = scoped.filter((d) => d.runCount === 0 && d.lessons.length === 0);
+  const showWarmup = warmup.phase !== 'idle' || freshDomains.length > 0;
+  const warmupTitles =
+    freshDomains.length > 0
+      ? freshDomains.map((d) => d.title)
+      : [current?.title ?? scoped[0]?.title ?? ''];
+  // Only the warm-up card needs the candidate count, so it is not requested at all once every
+  // direction has been practiced; when it is needed it batches with the portrait only on a
+  // warm SWR cache (cold loads resolve the portrait first).
+  const { data: history } = useHistoryCount(showWarmup ? (activeAgentId ?? undefined) : undefined);
 
   const teach = async (text: string) => {
     const target = teachDomainId ?? current?.id ?? scoped[0]?.id;
@@ -160,8 +165,60 @@ const SelfLearning = memo(() => {
 
   const openCreate = () => {
     if (!activeAgentId) return;
-    openCreateDomainModal({ agentId: activeAgentId, onCreated: () => void mutate() });
+    navigate(urlJoin('/agent', activeAgentId, 'self-evolving/new'));
   };
+
+  // Dropping a direction takes its habits and practice history with it — say so before asking.
+  const confirmDelete = (domain: ExpertiseDomainItem) => {
+    confirmModal({
+      cancelText: t('cancel', { ns: 'common' }),
+      content: t('domain.deleteConfirm.content', {
+        habits: domain.lessons.length,
+        runs: domain.runCount,
+      }),
+      okButtonProps: { danger: true },
+      okText: t('domain.deleteConfirm.ok'),
+      onOk: async () => {
+        try {
+          await expertiseService.deleteDomain(domain.id);
+          toast.success(t('domain.deleted'));
+          await mutate();
+          if (domainId && activeAgentId)
+            navigate(urlJoin('/agent', activeAgentId, 'self-evolving'));
+        } catch {
+          toast.error(t('domain.deleteFailed'));
+        }
+      },
+      title: t('domain.deleteConfirm.title', { name: domain.title }),
+    });
+  };
+
+  // Secondary actions live in one menu: reviewing history is occasional, deleting is rare.
+  const moreMenu: DropdownItem[] = [
+    ...(showWarmup
+      ? []
+      : [
+          {
+            disabled: warmup.starting,
+            icon: <Icon icon={HistoryIcon} />,
+            key: 'warmup',
+            label: t('nav.warmup'),
+            onClick: () => void warmup.start(),
+          } satisfies DropdownItem,
+        ]),
+    ...(current
+      ? [
+          ...(showWarmup ? [] : [{ type: 'divider' } satisfies DropdownItem]),
+          {
+            danger: true,
+            icon: <Icon icon={Trash2Icon} />,
+            key: 'delete',
+            label: t('domain.delete'),
+            onClick: () => confirmDelete(current),
+          } satisfies DropdownItem,
+        ]
+      : []),
+  ];
 
   return (
     <Flexbox height={'100%'} width={'100%'}>
@@ -171,10 +228,12 @@ const SelfLearning = memo(() => {
           activeAgentId ? (
             <AgentBreadcrumb
               agentId={activeAgentId}
-              extraItems={domainId && current ? [current.title] : undefined}
+              // Whenever the portrait is about one direction — drilled in, or the only one
+              // there is — say so in the trail; otherwise the headline reads like a page title.
+              extraItems={current ? [current.title] : undefined}
               title={
                 domainId && current ? (
-                  <Link to={urlJoin('/agent', activeAgentId, 'self-learning')}>{t('title')}</Link>
+                  <Link to={urlJoin('/agent', activeAgentId, 'self-evolving')}>{t('title')}</Link>
                 ) : (
                   t('title')
                 )
@@ -188,19 +247,21 @@ const SelfLearning = memo(() => {
               <Button icon={PlusIcon} onClick={() => setTeachOpen((v) => !v)}>
                 {t('nav.teach')}
               </Button>
-              {!showWarmup && (
-                <Button
-                  icon={HistoryIcon}
-                  loading={warmup.starting}
-                  type={'text'}
-                  onClick={() => void warmup.start()}
-                >
-                  {t('nav.warmup')}
+              {/* Starting a new direction belongs to the overview, not to one direction's page. */}
+              {!domainId && (
+                <Button type={'text'} onClick={openCreate}>
+                  {t('nav.newDomain')}
                 </Button>
               )}
-              <Button type={'text'} onClick={openCreate}>
-                {t('nav.newDomain')}
-              </Button>
+              {moreMenu.length > 0 && (
+                <DropdownMenu items={moreMenu}>
+                  <ActionIcon
+                    icon={MoreHorizontalIcon}
+                    loading={warmup.starting}
+                    title={t('domain.more')}
+                  />
+                </DropdownMenu>
+              )}
             </Flexbox>
           ) : null
         }
@@ -219,7 +280,7 @@ const SelfLearning = memo(() => {
                 <Empty
                   description={t('empty.desc')}
                   descriptionProps={{ fontSize: 13 }}
-                  icon={GraduationCapIcon}
+                  icon={DnaIcon}
                   style={{ maxWidth: 420 }}
                   title={t('empty.title')}
                   action={
@@ -273,7 +334,7 @@ const SelfLearning = memo(() => {
               {showWarmup && (
                 <WarmupCard
                   candidateCount={history?.candidateCount}
-                  domainTitle={warmupTitle}
+                  domainTitles={warmupTitles}
                   warmup={warmup}
                 />
               )}
@@ -289,6 +350,11 @@ const SelfLearning = memo(() => {
                   agentId={activeAgentId}
                   domainTitles={single ? undefined : domainTitles}
                   habits={habits}
+                  viewAllPath={
+                    current
+                      ? urlJoin('/agent', activeAgentId, 'self-evolving', current.id, 'experience')
+                      : undefined
+                  }
                   onChanged={() => void mutate()}
                 />
               )}
@@ -300,7 +366,7 @@ const SelfLearning = memo(() => {
                   domains={allDomains}
                   onOpen={(id) => {
                     if (!activeAgentId) return;
-                    navigate(urlJoin('/agent', activeAgentId, 'self-learning', id));
+                    navigate(urlJoin('/agent', activeAgentId, 'self-evolving', id));
                   }}
                 />
               )}

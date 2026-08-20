@@ -2,6 +2,7 @@
 
 import {
   BrainCircuit,
+  Download,
   FilePenIcon,
   FilesIcon,
   FileText,
@@ -24,6 +25,7 @@ import {
   BusinessResourceRoutes,
 } from '@/business/client/BusinessDesktopRoutes';
 import BrandTextLoading from '@/components/Loading/BrandTextLoading';
+import AppsSkeleton from '@/components/Skeleton/Apps';
 import ConversationLayoutSkeleton from '@/components/Skeleton/Conversation/Layout';
 import ConversationSegmentSkeleton from '@/components/Skeleton/Conversation/Segment';
 import GoalSkeleton from '@/components/Skeleton/Goal';
@@ -231,32 +233,67 @@ export const sharedMainAreaChildren: RouteObject[] = [
               'Desktop > Chat > Self Learning',
             ),
             handle: { meta: agentSelfLearningRouteMeta },
-            path: 'self-learning',
-          },
-          // 单个专长的完整拟合面板。做成路由而不是页内状态，深链才打得开。
-          {
-            element: dynamicElement(
-              () => import('@/routes/(main)/agent/self-learning/[domainId]'),
-              'Desktop > Chat > Self Learning > Domain',
-            ),
-            handle: { meta: agentSelfLearningRouteMeta },
-            path: 'self-learning/:domainId',
+            path: 'self-evolving',
           },
           {
             element: dynamicElement(
-              () => import('@/routes/(main)/agent/self-learning/[domainId]/rules'),
-              'Desktop > Chat > Self Learning > Domain > Rules',
+              () => import('@/routes/(main)/agent/self-learning/new'),
+              'Desktop > Chat > Self Learning > Create',
             ),
             handle: { meta: agentSelfLearningRouteMeta },
-            path: 'self-learning/:domainId/rules',
+            path: 'self-evolving/new',
           },
+          // 单个方向的成长画像。做成路由而不是页内状态，深链才打得开。
+          {
+            children: [
+              {
+                element: dynamicElement(
+                  () => import('@/routes/(main)/agent/self-learning/[domainId]'),
+                  'Desktop > Chat > Self Learning > Domain',
+                ),
+                handle: { meta: agentSelfLearningRouteMeta },
+                index: true,
+              },
+              // 一个方向的全部经验（不折叠的完整清单）和单条经验详情。
+              {
+                element: dynamicElement(
+                  () => import('@/routes/(main)/agent/self-learning/[domainId]/experience'),
+                  'Desktop > Chat > Self Learning > Domain > Experience',
+                ),
+                handle: { meta: agentSelfLearningRouteMeta },
+                path: 'experience',
+              },
+              {
+                element: dynamicElement(
+                  () =>
+                    import('@/routes/(main)/agent/self-learning/[domainId]/experience/[lessonId]'),
+                  'Desktop > Chat > Self Learning > Domain > Lesson',
+                ),
+                handle: { meta: agentSelfLearningRouteMeta },
+                path: 'experience/:lessonId',
+              },
+              // Legacy `/rules` deep-links — kept so old links keep opening.
+              {
+                element: redirectElement('../experience'),
+                path: 'rules',
+              },
+              {
+                element: dynamicElement(
+                  () => import('@/routes/(main)/agent/self-learning/[domainId]/rules/[lessonId]'),
+                  'Desktop > Chat > Self Learning > Domain > Legacy Rule',
+                ),
+                path: 'rules/:lessonId',
+              },
+            ],
+            path: 'self-evolving/:domainId',
+          },
+          // Legacy `/self-learning` deep-links keep their remaining path when redirected.
           {
             element: dynamicElement(
-              () => import('@/routes/(main)/agent/self-learning/[domainId]/rules/[lessonId]'),
-              'Desktop > Chat > Self Learning > Domain > Rule',
+              () => import('@/routes/(main)/agent/self-learning/legacy'),
+              'Desktop > Chat > Legacy Self Learning Redirect',
             ),
-            handle: { meta: agentSelfLearningRouteMeta },
-            path: 'self-learning/:domainId/rules/:lessonId',
+            path: 'self-learning/*',
           },
           {
             element: dynamicElement(
@@ -988,6 +1025,16 @@ export const sharedMainAreaChildren: RouteObject[] = [
 
 const createMainAreaChildrenDefinition = (options: MainAreaRouteOptions = {}): RouteObject[] => [
   ...sharedMainAreaChildren,
+
+  // Apps page (personal-only — never mirrored under /:workspaceSlug)
+  {
+    element: dynamicElement(() => import('@/routes/(main)/apps'), 'Desktop > Apps', {
+      fallback: <AppsSkeleton />,
+    }),
+    errorElement: <ErrorBoundary />,
+    handle: { meta: routeMeta({ icon: Download, titleKey: 'navigation.apps' }) },
+    path: 'apps',
+  },
 
   // Settings routes (personal-only — never mirrored under /:workspaceSlug)
   {

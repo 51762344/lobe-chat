@@ -124,6 +124,7 @@ export const topicKeys = {
     containerKey,
     opts,
   ]),
+  detail: def('topic:detail', (topicId: string) => ['topic:detail', topicId]),
   list: def('topic:list', (containerKey: string, opts: Record<string, unknown>) => [
     'topic:list',
     containerKey,
@@ -356,17 +357,18 @@ export const workKeys = {
   versions: def('work:versions', (workId: string) => ['work:versions', workId]),
   // Cross-topic Work gallery on the resource page: keyed by owner scope + the
   // gallery filter key (type OR provider tab, e.g. `all` / `task` / `linear`) +
-  // keyset cursor (one entry per infinite-scroll page). The filter key (not the
-  // Work type) is the discriminator so the per-provider linear/github tabs,
-  // which share the `external` Work type, get distinct cache entries.
+  // keyset cursor (one entry per infinite-scroll page) + the Resources
+  // Private/Workspace visibility. The filter key (not the Work type) is the
+  // discriminator so the per-provider linear/github tabs, which share the
+  // `external` Work type, get distinct cache entries.
   workspace: def(
     'work:workspace',
-    (workspaceId: string | null | undefined, filterKey: string, cursor?: string | null) => [
-      'work:workspace',
-      workspaceId ?? null,
-      filterKey,
-      cursor ?? null,
-    ],
+    (
+      workspaceId: string | null | undefined,
+      filterKey: string,
+      cursor?: string | null,
+      visibility?: 'private' | 'public' | null,
+    ) => ['work:workspace', workspaceId ?? null, filterKey, cursor ?? null, visibility ?? null],
   ),
 };
 
@@ -986,16 +988,20 @@ export const verifyKeys = {
 
 // ---- inbox / notifications ----------------------------------------------
 export const inboxKeys = {
+  navigationCounts: def('inbox:navigationCounts', (workspaceId: string | null) => [
+    'inbox:navigationCounts',
+    workspaceId,
+  ]),
   notifications: def(
     'inbox:notifications',
     // Keyed by context: the server scopes the inbox to the active workspace
     // (null = personal), so cached pages must never be reused across contexts.
-    (workspaceId: string | null, cursor: string | undefined, unreadOnly: boolean | undefined) => [
-      'inbox:notifications',
-      workspaceId,
-      cursor,
-      unreadOnly,
-    ],
+    (
+      workspaceId: string | null,
+      cursor: string | undefined,
+      category: string | undefined,
+      isRead: boolean | undefined,
+    ) => ['inbox:notifications', workspaceId, cursor, category, isRead],
   ),
   unreadCount: def('inbox:unreadCount', (workspaceId: string | null) => [
     'inbox:unreadCount',
@@ -1169,7 +1175,30 @@ export const resourceKeys = {
     params,
     workspaceId,
   ]),
-  search: def('resource:search', (params: unknown) => ['resource:search', params]),
+  // Every Resources cache entry is workspace-scoped: the same visibility means
+  // different rows in each workspace, so leaving `workspaceId` out of the key
+  // makes a workspace switch serve the previous workspace's rows from cache.
+  recentFiles: def(
+    'resource:recentFiles',
+    (workspaceId: string | null, visibility?: 'private' | 'public') => [
+      'resource:recentFiles',
+      workspaceId,
+      visibility ?? null,
+    ],
+  ),
+  recentPages: def(
+    'resource:recentPages',
+    (workspaceId: string | null, visibility?: 'private' | 'public') => [
+      'resource:recentPages',
+      workspaceId,
+      visibility ?? null,
+    ],
+  ),
+  search: def('resource:search', (params: unknown, workspaceId: string | null) => [
+    'resource:search',
+    params,
+    workspaceId,
+  ]),
 };
 export const providerKeys = {
   clientConfig: def('provider:clientConfig', (id: string) => ['provider:clientConfig', id]),
