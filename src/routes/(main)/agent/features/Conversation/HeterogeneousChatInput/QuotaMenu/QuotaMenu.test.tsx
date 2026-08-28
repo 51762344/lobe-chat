@@ -223,6 +223,27 @@ vi.mock('@lobehub/ui', async () => {
 });
 
 vi.mock('@lobehub/ui/base-ui', () => ({
+  ActionIcon: ({
+    onClick,
+    title,
+    disabled,
+  }: {
+    disabled?: boolean;
+    onClick?: (e: React.MouseEvent) => void;
+    title?: string;
+  }) => (
+    <button
+      aria-label={title}
+      data-testid={title ? 'calendar' : 'refresh'}
+      disabled={disabled}
+      type="button"
+      onClick={onClick}
+    />
+  ),
+  RadioGroup: () => null,
+  Switch: () => null,
+  Text: ({ children }: { children?: ReactNode }) => <span>{children}</span>,
+  createModal: vi.fn(),
   Button: ({
     children,
     disabled,
@@ -975,6 +996,21 @@ describe('ClaudeCodeQuotaMenu', () => {
 });
 
 describe('CodexQuotaMenu', () => {
+  it.each([
+    [
+      'failed to fetch codex rate limits: error sending request for url (https://chatgpt.com/backend-api/wham/usage)',
+      'heteroAgent.codexQuota.errorConnection',
+    ],
+    ['unexpected RPC failure', 'heteroAgent.codexQuota.errorGeneric'],
+  ])('shows a friendly error instead of exposing %s', async (error, expectedMessage) => {
+    mockService.getCodexQuota.mockResolvedValue(codexSnapshot({ error, status: 'error' }));
+
+    render(<CodexQuotaMenu command="codex" />);
+
+    expect(await screen.findByText(expectedMessage)).toBeTruthy();
+    expect(screen.queryByText(error)).toBeNull();
+  });
+
   it('renders windows and the reset-credits footer', async () => {
     const resetsAt = Date.now() + 60 * 60_000;
     mockService.getCodexQuota.mockResolvedValue(
