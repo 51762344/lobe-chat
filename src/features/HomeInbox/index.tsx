@@ -6,6 +6,10 @@ import { ChevronLeftIcon, ChevronRightIcon } from 'lucide-react';
 import { Fragment, memo, type ReactNode, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import {
+  useHomeUsageWidget,
+  useHomeUsageWidgetActive,
+} from '@/business/client/features/HomeUsageWidget';
 import { useWorkspaceMemberProfiles } from '@/business/client/hooks/useWorkspaceMemberProfiles';
 import AsyncError from '@/components/AsyncError';
 import { BriefCardSkeleton } from '@/features/DailyBrief/BriefCardSkeleton';
@@ -32,7 +36,7 @@ import { resolveInboxBlockState } from './inboxBlockState';
 import InboxBriefCard from './InboxBriefCard';
 import MarkAllReadButton from './MarkAllReadButton';
 import NeedsYouRailCard from './NeedsYouRailCard';
-import { resolveShownNewsOffset } from './newsDayOffset';
+import { resolveShownNewsOffset, shouldShowNewsItemTime } from './newsDayOffset';
 import NewsList from './NewsList';
 import { ownsRailSections } from './railSectionPlacement';
 import RunningTasksCard from './RunningTasksCard';
@@ -186,6 +190,13 @@ const HomeInbox = memo<HomeInboxProps>((props) => {
   const topics = useHomeInboxTopics(isLogin);
   const recommendationsVisible = useRecommendationsVisible();
   const hiddenWidgets = useGlobalStore(systemStatusSelectors.hiddenHomeWidgets);
+
+  // Business-slot widget: `enabled` false while it's toggled off or its column
+  // isn't on the page, so the slot implementation can skip its fetches.
+  const usageActive = useHomeUsageWidgetActive();
+  const usageNode = useHomeUsageWidget(
+    isLogin === true && usageActive && showRailSections && !hiddenWidgets.includes('usage'),
+  );
 
   // A team context is a workspace with more than the viewer in it. In personal
   // mode this map is empty, so `isTeam` is false and the whole mine/team layer
@@ -486,11 +497,22 @@ const HomeInbox = memo<HomeInboxProps>((props) => {
             {t(shownNewsOffset === 0 ? 'inbox.news.emptyToday' : 'inbox.news.emptyDay')}
           </span>
         ) : (
-          <NewsList bare={isRail} news={news} />
+          <NewsList bare={isRail} news={news} showTime={shouldShowNewsItemTime(shownNewsOffset)} />
         ),
       subtitle: t('inbox.news.subtitle'),
     });
   }
+
+  // The rail's LAST card, below even the suggestions: usage is passive
+  // reference data, glanceable but never urgent, so it sits under everything
+  // that reports actual work. Same shell as every other rail widget.
+  const usageCard =
+    usageNode &&
+    (isRail ? (
+      <RailCard title={t('inbox.usage.title')}>{usageNode}</RailCard>
+    ) : (
+      <GroupBlock title={t('inbox.usage.title')}>{usageNode}</GroupBlock>
+    ));
 
   const visibleSections = filterHiddenWidgetSections(sections, hiddenWidgets);
 
@@ -498,9 +520,10 @@ const HomeInbox = memo<HomeInboxProps>((props) => {
     if (isMain) return null;
 
     if (isRail)
-      return recommendationsVisible ? (
+      return recommendationsVisible || usageCard ? (
         <Flexbox gap={12}>
-          <Recommendations variant={'rail'} />
+          {recommendationsVisible && <Recommendations variant={'rail'} />}
+          {usageCard}
         </Flexbox>
       ) : null;
 
@@ -514,6 +537,7 @@ const HomeInbox = memo<HomeInboxProps>((props) => {
             <Recommendations />
           </Flexbox>
         )}
+        {usageCard}
       </>
     );
   }
@@ -584,6 +608,7 @@ const HomeInbox = memo<HomeInboxProps>((props) => {
       )}
 
       {!isMain && <Recommendations variant={variant} />}
+      {usageCard}
     </Flexbox>
   );
 });

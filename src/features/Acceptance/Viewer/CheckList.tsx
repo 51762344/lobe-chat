@@ -256,6 +256,9 @@ const styles = createStaticStyles(({ css }) => ({
   groupCard: css`
     background: ${cssVar.colorBgContainer};
   `,
+  groupedCard: css`
+    padding-inline: 12px;
+  `,
   groupHeader: css`
     cursor: pointer;
     padding-block: 10px;
@@ -1488,6 +1491,7 @@ const CheckRow = memo<{
                 <Flexbox gap={10} style={{ marginBlockStart: 6 }}>
                   {hasAnnotatableEvidence(check) && (
                     <Button
+                      outdent
                       icon={<Icon icon={Images} />}
                       style={{ alignSelf: 'flex-start' }}
                       type={'text'}
@@ -1827,7 +1831,7 @@ const CheckList = memo<CheckListProps>(
     }
 
     return (
-      <Flexbox className={styles.groupCard}>
+      <Flexbox className={cx(styles.groupCard, styles.groupedCard)}>
         {groups.map(({ checks: groupChecks_, key, label, rows }, groupIndex) => {
           const passed = groupChecks_.filter((check) => check.state === 'passed').length;
           const collapsed = collapsedGroups.has(key);

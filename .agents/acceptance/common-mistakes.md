@@ -157,6 +157,26 @@ the image lands unpaired and unlabeled. Publish a fresh round carrying the compl
 evidence set instead, and say in `report.md` that it re-publishes the same
 observations rather than re-running the cases.
 
+### L-E11b — Publishing a new round onto a check the reviewer already accepted
+
+**Wrong approach:** when new feedback arrives about a check the user has already
+accepted, reuse that check's id for the new work — because reusing ids is the rule for
+rejected checks.
+
+**Why it fails:** an accepted verdict is deliberately sticky (`acceptanceService`
+computes `stale` only for rejects, and a test pins that behaviour by name). A later
+result on a settled id therefore inherits the tick: the round publishes green and the
+reviewer is never told there is anything new to look at. Since 2026-08, `attachRun`
+refuses such a round outright — the error names the offending ids and nothing is
+written, so a partially attached round cannot happen.
+
+**Correct approach:** read `userReview.action` before writing the plan. `accept` means
+settled: the new work needs a NEW check id, which appears unreviewed and can actually
+be judged. Reuse the id only while the check is rejected or never reviewed. Decide by
+_is the criterion new, and has the old one been accepted_ — not by how big the change
+is: a presentation fix on a still-open check reuses its id (\[\[L-E1]]), while a newly
+raised criterion on an accepted check must not.
+
 ### L-E12 — Expressing multimodal disclosure through the `verifier` enum
 
 **Wrong approach:** write a value such as `"verifier": "multimodal LLM"` in a plan
@@ -285,6 +305,26 @@ it makes a green verification cover only half of what users can see.
 where the action key is actually enabled (grep each route's `leftActions` array, not
 the component's imports) and capture evidence for every surface that enables it. Mark
 any surface you deliberately skip as untested.
+
+### L-E19 — Hard-wrapping the prose inside a markdown evidence document
+
+**Wrong approach:** author a `markdown` / `text` evidence artifact the way you write
+a source file, folding every paragraph at \~80 columns, and assume the page reflows
+it like any other markdown.
+
+**Why it fails:** the Acceptance evidence renderer parses evidence documents in chat
+mode, where `remark-breaks` turns every single newline inside a paragraph into a
+`<br>`. The author's fold is frozen into the page: paragraphs break mid-sentence at a
+column count unrelated to the reader's viewport, next to a report body that reflows
+normally, so the same round shows two different text behaviours. Reviewers read the
+ragged block as a rendering defect and spend the round on the wrapping instead of the
+finding.
+
+**Correct approach:** keep each paragraph of evidence prose on ONE physical line and
+separate blocks with a blank line. Spend a newline only where it carries meaning —
+list items, table rows, fenced code, and literal transcript output, which are exactly
+the places the break is the content. Never run a proseWrap formatter over files under
+`assets/`.
 
 ## Product and interaction contracts
 
@@ -445,6 +485,45 @@ non-negative overflow is a defect regardless of how the screenshot reads. Bound 
 by the space the positioner publishes (`--available-height`, less the popup's own chrome)
 rather than relying on collision flipping.
 
+### L-D12 — Assuming a menu dispatches an item just because it rendered
+
+**Wrong approach:** add an entry to a message/context menu — especially a nested one under a
+submenu — confirm from a screenshot that the label and icon appear where intended, and call
+the entry verified.
+
+**Why it fails:** menu rendering and menu dispatch are separate contracts here. The dropdown
+only invokes an item that carries its own `onClick`, and the group wrapper attaches one to
+top-level items only, so a nested child renders perfectly and does nothing when clicked — the
+menu just closes, with no error, no toast, and no console output. Any routing the consumer
+writes on the parent's side (by `keyPath` or otherwise) never runs, because the click was
+dropped before it. A screenshot of an open submenu therefore proves placement and nothing
+else.
+
+**Correct approach:** for every menu entry you add, click it and assert the effect it is
+supposed to have — a dialog opens, a request fires, a store field changes. Treat "the menu
+closed and nothing happened" as the expected failure signature, not as a missed click. When
+the entry is nested, verify the child's own dispatch wiring, not the parent's.
+
+### L-D13 — Picking `cssVar` color-scale steps by antd-palette intuition
+
+**Wrong approach:** choose antd-style palette steps (`cssVar.blue1` for a tint,
+`cssVar.blue6` for the primary line) from the standard antd 10-step palette in
+your head, and judge the result from the code alone.
+
+**Why it fails:** LobeHub's theme overrides the color scales with an 11-step
+palette whose primary-strength band sits at x9–x10 — light-mode `blue-6`
+resolves to `#acd4ff` and `blue-7` to `#93c8ff`, both near-pastel, nothing like
+antd's `blue-6` `#1677ff`. The UI then renders washed out while every token
+name in the code reads correct, and a one-step "fix" (x1→x2, x6→x7) changes
+almost nothing.
+
+**Correct approach:** never pick a scale step without reading the resolved
+value in the running app (`getComputedStyle` on the element, or resolve
+`--ant-<color>-<n>` from the element's scope — the variables are scoped, not on
+`:root`). For a tinted-tile + line pairing, the working band is around x3 for
+the tint and x9–x10 for the line, verified in both themes: the scale flips in
+dark mode, so a step that is a tint in light is a deep fill in dark.
+
 ## Environment safety
 
 ### L-S0 — Concluding a dependency moved from the root manifest alone
@@ -555,6 +634,16 @@ agent-browser --cdp 9222 eval "(async()=>{const t=await (await fetch('app://rend
 A wrong-worktree hit means the instance is someone else's session: do not restart or
 reuse it, start a pool instance (`electron-dev.sh start <id>`) or switch surface.
 
+**Same failure, third shape — the pool port is not owned by Electron at all.**
+`electron-dev.sh start <id>` treats a reachable `CDP_BASE + id` as "already running"
+and skips the launch with `CDP already reachable on <port>. Skipping start`, so the
+run then drives whatever owns it. Any other debugger on that port claims the slot —
+`workerd`/`wrangler` defaults to 9229, which is pool id 7. The give-away is that
+`electron-dev.sh list` does not list the instance as up while the port answers.
+Before picking a pool id, read `/json/version` on its port and require an Electron
+`Browser` string (a `wrangler/*` or `node` answer means pick another id), or check
+the port is free at all.
+
 ### L-S6 — Reading or writing the url from a portal'd sidebar on desktop
 
 **Wrong approach:** use `useSearchParams`, `useQueryState`, `useParams`,
@@ -617,6 +706,41 @@ with unrelated identifiers — a component name like `SkillRow` also matches a C
 `addSkillRow`, so a substring count "confirms" the wrong state.
 
 ---
+
+**Same failure, fourth shape — the dep optimizer is wedged, and only Vite needs
+restarting.** The SPA sits on the HTML loading shell (`rootChildren: 0`, `innerText`
+empty) with a clean console and `vite connected` — no error anywhere. Crawling the
+module graph from the entry is what names it: every direct import returns 200 while
+`node_modules/.vite/deps/*` answers **504**, so `import()` of the entry fails with the
+generic `Failed to fetch dynamically imported module`, which reads like a broken route
+tree in the branch under test. Recovery is `rm -rf node_modules/.vite/deps` plus a real
+Vite process restart — and Vite is its OWN process here (`bash -c source /tmp/dev-env.sh
+&& bun run dev:spa`), independent of the `next dev` tree, so a shared worktree's Next
+server does not have to be touched. Reuse the same env file the running pair was
+started from rather than re-deriving it.
+
+### L-S17 — Diagnosing the feature when the dev DB lost its seeded user row
+
+**Wrong approach:** see the product's own list endpoint return `{ items: [] }` and its
+write endpoints fail, and start debugging the query, the scope filter, or the change
+under test.
+
+**Why it fails:** the dev server resolves `ctx.userId` for the seeded account without
+needing a `sessions` row, so a database that lost its `users` row still reads as
+authenticated: `setup-auth.sh status --surface web` reports green, every read returns
+an empty result, and every write dies inside Postgres on the `user_id` foreign key.
+The tRPC error surfaces as a giant `Failed query: insert into "acceptances" …` whose
+FK cause is only visible in the params tail, so it reads as a schema or payload
+problem rather than a missing row. The managed acceptance Postgres is shared and
+long-lived, so a `clean-db` from any worktree leaves every later run in this state.
+
+**Correct approach:** when reads are empty AND writes fail, check the row before the
+code — `select id from users` in the DB the server actually uses. Resolve that DB from
+the env file the running server was launched with, never from `test-env.sh` defaults;
+a dev server started by another session can point somewhere else entirely. Re-seed with
+`init-dev-env.sh seed-user`, then prove the fix with a real product write (an `ensure`
+round-trip), and re-run `setup-auth.sh web-seed` because the SPA's client-side auth
+gate still redirects to `/signin` after the row is recreated.
 
 ### L-S8 — Reading a first-boot renderer crash as a defect of the change under test
 

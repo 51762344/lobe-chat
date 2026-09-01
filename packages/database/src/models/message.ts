@@ -43,6 +43,7 @@ import {
   count,
   desc,
   eq,
+  getTableColumns,
   gt,
   gte,
   inArray,
@@ -59,7 +60,9 @@ import { merge } from '@/utils/merge';
 import { sanitizeNullBytes } from '@/utils/sanitizeNullBytes';
 import { today } from '@/utils/time';
 
+import type { FtsSearchCandidateSource } from '../repositories/ftsSearch';
 import {
+  agents,
   agentsToSessions,
   chunks,
   documents,
@@ -82,9 +85,51 @@ import { sanitizeBm25Query } from '../utils/bm25';
 import { notCopiedTranscript } from '../utils/copiedTranscript';
 import { genEndDateWhere, genRangeWhere, genStartDateWhere, genWhere } from '../utils/genWhere';
 import { idGenerator } from '../utils/idGenerator';
+import { inJsonStringArray } from '../utils/inJsonStringArray';
 import { buildWorkspacePayload, buildWorkspaceWhere } from '../utils/workspace';
 import { recomputeTopicUsage } from './topicUsage';
 import { WorkModel } from './work';
+
+const createChatImageItem = ({
+  id,
+  metadata,
+  name,
+  url,
+}: {
+  id: string;
+  metadata: unknown;
+  name: string;
+  url: string;
+}): ChatImageItem => {
+  const imageMetadata = isPlainRecord(metadata) ? metadata : {};
+  const height =
+    typeof imageMetadata.height === 'number' &&
+    Number.isFinite(imageMetadata.height) &&
+    imageMetadata.height > 0
+      ? imageMetadata.height
+      : undefined;
+  const ratio =
+    typeof imageMetadata.ratio === 'number' &&
+    Number.isFinite(imageMetadata.ratio) &&
+    imageMetadata.ratio > 0
+      ? imageMetadata.ratio
+      : undefined;
+  const width =
+    typeof imageMetadata.width === 'number' &&
+    Number.isFinite(imageMetadata.width) &&
+    imageMetadata.width > 0
+      ? imageMetadata.width
+      : undefined;
+
+  return {
+    alt: name,
+    ...(height && { height }),
+    id,
+    ...(ratio && { ratio }),
+    url,
+    ...(width && { width }),
+  };
+};
 
 export class HumanApprovalAlreadyResolvedError extends Error {
   constructor(messageId: string) {
@@ -408,12 +453,19 @@ const computeTopicMessageStats = (counts: number[]): TopicMessageStats => {
 export class MessageModel {
   private userId: string;
   private db: LobeChatDatabase;
+  private ftsSearchCandidateSource?: FtsSearchCandidateSource;
   private workspaceId?: string;
 
-  constructor(db: LobeChatDatabase, userId: string, workspaceId?: string) {
+  constructor(
+    db: LobeChatDatabase,
+    userId: string,
+    workspaceId?: string,
+    ftsSearchCandidateSource?: FtsSearchCandidateSource,
+  ) {
     this.userId = userId;
     this.db = db;
     this.workspaceId = workspaceId;
+    this.ftsSearchCandidateSource = ftsSearchCandidateSource;
   }
 
   private ownership = () =>
@@ -955,8 +1007,9 @@ export class MessageModel {
                 ),
               imageList: imageList
                 .filter((relation) => relation.messageId === item.id)
-
-                .map<ChatImageItem>(({ id, url, name }) => ({ alt: name!, id, url })),
+                .map(({ id, metadata, name, url }) =>
+                  createChatImageItem({ id, metadata, name: name!, url }),
+                ),
 
               model,
 
@@ -1622,7 +1675,9 @@ export class MessageModel {
             ),
           imageList: imageList
             .filter((relation) => relation.messageId === item.id)
-            .map<ChatImageItem>(({ id, url, name }) => ({ alt: name!, id, url })),
+            .map(({ id, metadata, name, url }) =>
+              createChatImageItem({ id, metadata, name: name!, url }),
+            ),
 
           model,
 
@@ -1983,19 +2038,27 @@ export class MessageModel {
     return result[0];
   };
 
-  queryAll = async (params?: { current?: number; pageSize?: number }) => {
-    const { current = 0, pageSize = 100 } = params ?? {};
+  queryAll = async (params?: MessageAnalyticsFilters & { current?: number; pageSize?: number }) => {
+    const { current = 0, pageSize = 100, ...filters } = params ?? {};
     const offset = current * pageSize;
 
     const result = await this.db
-      .select()
+      .select({
+        ...getTableColumns(messages),
+        agentName: agents.name,
+        agentTitle: agents.title,
+      })
       .from(messages)
-      .where(and(this.ownership()))
+      .leftJoin(agents, eq(messages.agentId, agents.id))
+      .where(genWhere(this.analyticsConditions(filters)))
       .orderBy(desc(messages.createdAt))
       .limit(pageSize)
       .offset(offset);
 
-    return result as DBMessageItem[];
+    return result as (DBMessageItem & {
+      agentName: string | null;
+      agentTitle: string | null;
+    })[];
   };
 
   queryBySessionId = async (sessionId?: string | null) => {
@@ -2011,10 +2074,26 @@ export class MessageModel {
     if (!keyword.trim()) return [];
 
     const bm25Query = sanitizeBm25Query(keyword);
+    const candidateResult = this.ftsSearchCandidateSource?.ftsSearchCandidateEnabled
+      ? await this.ftsSearchCandidateSource.ftsSearchCandidates({
+          entity: 'messages',
+          filters: {},
+          pagination: {},
+          query: { fields: ['content'], text: keyword },
+        })
+      : undefined;
+    const candidateIds = candidateResult?.candidates.map(({ id }) => id);
     const result = await this.db
       .select()
       .from(messages)
-      .where(and(this.ownership(), sql`${messages.content} @@@ ${bm25Query}`))
+      .where(
+        and(
+          this.ownership(),
+          candidateIds
+            ? inJsonStringArray(messages.id, candidateIds)
+            : sql`${messages.content} @@@ ${bm25Query}`,
+        ),
+      )
       .orderBy(desc(messages.createdAt));
 
     return result as DBMessageItem[];
