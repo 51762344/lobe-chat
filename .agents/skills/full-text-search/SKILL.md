@@ -41,8 +41,8 @@ router/service -> createFtsSearchRepo -> FtsSearchRepo -> selected backend -> ex
   provider is implemented end to end.
 - Elasticsearch errors, missing configuration, and unsupported candidate behavior must remain
   visible. Never silently retry through PostgreSQL or add an `ilike` fallback.
-- Deliberate routing of an entity that has not been migrated to Elasticsearch is not an error
-  fallback. Changing the migrated entity set is a product and migration decision.
+- Before selecting Elasticsearch, require coverage tests proving that it supports every entity in
+  the provider-neutral backend contract. Do not add per-entity routing between providers.
 - Preserve `userId`, `workspaceId`, and caller-agent visibility throughout every provider. Candidate
   retrieval must not broaden the caller's scope.
 - Where Elasticsearch only supplies candidate IDs, PostgreSQL hydration and parent checks remain
@@ -100,6 +100,8 @@ bun run db:install-fts-search-capture
 bun run fts-search:reindex -- --status
 bun run fts-search:reindex -- --apply --yes
 bun run fts-search:sync -- --max-steps=8 --yes
+bun run scripts/pgSearchCleanup/index.ts --status
+bun run scripts/pgSearchCleanup/index.ts --apply --yes
 ```
 
 Read `docs/self-hosting/advanced/elasticsearch-migration.mdx` or its Chinese counterpart before

@@ -38,6 +38,9 @@ export default {
   'acceptance.bar.progressDone': 'All {{total}} checks confirmed — ready to accept',
   'acceptance.bar.progressZero': '{{total}} checks awaiting your review',
   'acceptance.bar.rejectComment': 'Reject with comment',
+  'acceptance.bar.rerun': 'Fix',
+  'acceptance.bar.rerunDrafted': 'Drafted into your composer — review and send it.',
+  'acceptance.bar.rerunSent': 'Sent to the origin conversation — the repair round is starting.',
   'acceptance.checks.allAccepted.desc': 'Nice work — every acceptance check has been signed off.',
   'acceptance.checks.allAccepted.title': 'All checks accepted 🎉',
   'acceptance.checks.copied': 'Copied',
@@ -51,6 +54,7 @@ export default {
   'acceptance.checks.viewTrace': 'View verification run',
   'acceptance.checks.finalRoundHint':
     'The final result and evidence come from this round — click to locate it.',
+  'acceptance.checks.holisticTitle': 'Task delivery acceptance',
   'acceptance.checks.introduced': 'Added in round {{round}}',
   'acceptance.checks.introducedHint':
     'This check first appeared in that round — click to locate it.',
@@ -231,6 +235,12 @@ export default {
   'acceptance.roundStatus.repairing': 'Repairing',
   'acceptance.roundStatus.uncertain': 'Verify uncertain',
   'acceptance.roundStatus.verifying': 'In progress',
+  'acceptance.sharedNotice.readOnlyDescription':
+    'You can browse every check and its evidence, but only the author can act on this acceptance.',
+  'acceptance.sharedNotice.reviewableDescription':
+    'You can browse every check and its evidence, and review them on behalf of your workspace.',
+  'acceptance.sharedNotice.title': 'Shared with you',
+  'acceptance.sharedNotice.titleWithName': 'Shared by {{name}}',
   'acceptance.stats.failed': '{{count}} failed',
   'acceptance.stats.notExecuted': '{{count}} not executed',
   'acceptance.stats.passed': '{{count}} passed',
@@ -300,7 +310,11 @@ export default {
   'acceptance.workspace.batch.enter': 'Select multiple',
   'acceptance.workspace.batch.error': 'The batch action failed. Try again.',
   'acceptance.workspace.batch.exit': 'Done',
+  'acceptance.workspace.batch.move': 'Move to',
   'acceptance.workspace.batch.partial': '{{count}} updated, {{failed}} unchanged',
+  'acceptance.workspace.batch.projectRemoveSuccess':
+    '{{count}} acceptance(s) removed from their projects',
+  'acceptance.workspace.batch.projectSuccess': '{{count}} acceptance(s) moved to the project',
   'acceptance.workspace.batch.selectAll': 'Select all',
   'acceptance.workspace.batch.selected': '{{count}} selected',
   'acceptance.workspace.batch.statusSuccess': '{{count}} acceptance(s) updated',

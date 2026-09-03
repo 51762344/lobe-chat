@@ -4,15 +4,16 @@ import type {
   GoalTickBranch,
   GoalTickOutcome,
 } from '@lobechat/agent-tracing';
+import { GOAL_ACCEPTANCE_TASK_TITLE } from '@lobechat/const/goal';
 import type { GoalGraphNode, GoalGraphSnapshot, TaskItem } from '@lobechat/types';
 
-export const GOAL_ACCEPTANCE_TASK_TITLE = 'Complete full Goal acceptance';
+export { GOAL_ACCEPTANCE_TASK_TITLE } from '@lobechat/const/goal';
 
 /** Reason strings the recovery paths key off, written by the settle path. */
 export const LEASE_EXPIRED_ERROR = 'Goal Work operation lease expired.';
 export const VERIFICATION_FAILED_ERROR = 'Delivery did not pass verification.';
 
-const TERMINAL_NODE_STATUSES = new Set(['resolved', 'rejected', 'retired']);
+export const TERMINAL_NODE_STATUSES = new Set(['resolved', 'rejected', 'retired']);
 
 export interface FrontierSelection {
   /** Every eligible task node, best first — the trace-shaped view. */
@@ -106,7 +107,7 @@ export const frontierNeedsBudget = (
   });
 
 export interface GoalMoveInput {
-  /** Required only when {@link needsBudget} says the branch could dispatch. */
+  /** Required only when {@link needsBudget} says the branch could dispatch or recover. */
   budget?: GoalBudgetState;
   /** How many of this goal's Tasks may be in flight at once. */
   concurrency: number;
@@ -388,6 +389,18 @@ const decideForTask = (
     task.status === 'canceled' ||
     (task.status === 'paused' && task.error)
   ) {
+    if (
+      budget?.deadlinePassed &&
+      task.status === 'paused' &&
+      (task.error === LEASE_EXPIRED_ERROR || task.error === VERIFICATION_FAILED_ERROR)
+    ) {
+      return {
+        ...base,
+        branch: 'budget_exhausted',
+        message: `Deadline passed (${graph.goal.config?.schedule?.deadline ?? 'unknown'}); no new Work will be dispatched`,
+        outcome: 'no_progress',
+      };
+    }
     if (task.status === 'paused' && task.error === LEASE_EXPIRED_ERROR) {
       if (!capacity) return 'needs-capacity';
       return {
@@ -420,6 +433,15 @@ const decideForTask = (
   // Callers filter these out before they get here; kept so the classification
   // stays total if a status slips through.
   if (task.status === 'running' || task.status === 'scheduled') return 'parked';
+
+  if (budget?.deadlinePassed) {
+    return {
+      ...base,
+      branch: 'budget_exhausted',
+      message: `Deadline passed (${graph.goal.config?.schedule?.deadline ?? 'unknown'}); no new Work will be dispatched`,
+      outcome: 'no_progress',
+    };
+  }
 
   if (budget?.deadlinePassed) {
     return {

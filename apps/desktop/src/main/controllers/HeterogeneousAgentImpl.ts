@@ -45,6 +45,7 @@ import {
   QuotaSnapshotCache,
   readClaudeCodeIdentity,
 } from '@lobechat/heterogeneous-agents/quota-sampler';
+import { isLoginShellTimeoutStatus } from '@lobechat/heterogeneous-agents/resolveCliCommand';
 import type { AgentStreamEvent, UsageData } from '@lobechat/heterogeneous-agents/spawn';
 import {
   AcpRpcResponseError,
@@ -790,7 +791,11 @@ export default class HeterogeneousAgentCtr {
     const command = this.resolveSessionCommand(session);
     const status =
       command === defaultCommand
-        ? await this.app.binaryManager?.detect?.(defaultCommand, true)
+        ? // Normal launches must reuse the successful binary/PATH detection.
+          // Forcing here invalidates the login-shell PATH cache on every message,
+          // putting a slow interactive shell back on the critical path. Explicit
+          // Rescan actions remain responsible for force-refreshing the cache.
+          await this.app.binaryManager?.detect?.(defaultCommand)
         : await detectHeterogeneousCliCommand(session.agentType, command);
 
     if (!status || status.available) {
@@ -832,6 +837,23 @@ export default class HeterogeneousAgentCtr {
       // `#!/usr/bin/env node` shim spawned by absolute path still finds `node`.
       session.resolvedCommandSearchPath = useResolvedPath ? status!.resolvedPathEnv : undefined;
       return;
+    }
+
+    // A shell probe that ran out of time says nothing about whether the CLI is
+    // installed — on a busy machine it is the likeliest outcome, and the run
+    // before it may well have succeeded. Telling the user to install it would
+    // send them after software that is already there.
+    if (isLoginShellTimeoutStatus(status)) {
+      return {
+        agentType: session.agentType,
+        code: 'cli_detection_timeout',
+        command,
+        message:
+          `Timed out looking for \`${command}\` while reading PATH from your login shell. ` +
+          'This usually means the machine was busy rather than that the CLI is missing — ' +
+          'retry, or set an absolute path for the command in the agent settings.',
+        workingDirectory,
+      };
     }
 
     return this.buildCliMissingError(session);
