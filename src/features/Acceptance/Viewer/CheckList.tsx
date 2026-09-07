@@ -253,16 +253,17 @@ const styles = createStaticStyles(({ css }) => ({
   `,
   /* No card chrome: the row separators alone carry the list's structure. A
      border plus inline padding stole horizontal room from every row and made a
-     long checklist read as a boxed-in panel rather than a dense inventory. */
+     long checklist read as a boxed-in panel rather than a dense inventory.
+     The inline inset lives on each row/group header instead of the card, so
+     hover washes and the group band still run edge to edge while the text
+     keeps breathing room on both sides. */
   groupCard: css`
     background: ${cssVar.colorBgContainer};
-  `,
-  groupedCard: css`
-    padding-inline: 12px;
   `,
   groupHeader: css`
     cursor: pointer;
     padding-block: 10px;
+    padding-inline: 16px;
     background: ${cssVar.colorFillQuaternary};
 
     .acceptance-group-actions {
@@ -334,6 +335,7 @@ const styles = createStaticStyles(({ css }) => ({
   rowHeader: css`
     cursor: pointer;
     padding-block: 12px;
+    padding-inline: 16px;
 
     &:hover,
     &:focus-within {
@@ -420,6 +422,7 @@ const comparisonContent = (item: AcceptanceEvidence) => {
   if (item.type === 'screenshot' && item.fileUrl)
     return (
       <ScreenshotTiles
+        flat
         alt={item.description ?? item.fileName ?? item.type}
         fileHeight={item.fileHeight}
         fileWidth={item.fileWidth}
@@ -610,10 +613,11 @@ const EvidenceList = memo<{
         }
         if (item.content && markdownTextEvidenceTypes.has(item.type))
           return (
-            <Flexbox gap={4} key={item.id}>
-              <CollapsibleMarkdownEvidence>{item.content}</CollapsibleMarkdownEvidence>
-              {caption}
-            </Flexbox>
+            // An authored alt/description becomes the fold row's title itself —
+            // the supplement below the row duplicated it one line later.
+            <CollapsibleMarkdownEvidence key={item.id} title={description ?? undefined}>
+              {item.content}
+            </CollapsibleMarkdownEvidence>
           );
         if (item.content)
           return (
@@ -918,7 +922,7 @@ const IterationTimeline = memo<{
   );
 });
 
-const CheckRow = memo<{
+export const AcceptanceCheckRow = memo<{
   canReview: boolean;
   check: AcceptanceCheck;
   detailMode?: boolean;
@@ -1297,7 +1301,11 @@ const CheckRow = memo<{
         )}
 
         {expanded && (
-          <Flexbox gap={10} paddingBlock={detailMode ? 0 : '0 14px'} paddingInline={0}>
+          <Flexbox
+            gap={10}
+            paddingBlock={detailMode ? 0 : '0 14px'}
+            paddingInline={detailMode ? 0 : 16}
+          >
             {/* The model's proposal leads the detail: it is a claim about this
               check that the reviewer is being asked to rule on, so it belongs
               above the verifier's narrative rather than buried under it.
@@ -1617,7 +1625,7 @@ interface FocusedCheckDetailsProps {
 /** Full check content for the dedicated second-level acceptance workspace. */
 export const FocusedCheckDetails = memo<FocusedCheckDetailsProps>(
   ({ canReview, check, onDismissProposal, onOpenTrace, onReview, onRound, reviewPending }) => (
-    <CheckRow
+    <AcceptanceCheckRow
       detailMode
       expanded
       canReview={canReview}
@@ -1815,7 +1823,7 @@ const CheckList = memo<CheckListProps>(
       return (
         <Flexbox className={styles.groupCard}>
           {visibleRows.map((check) => (
-            <CheckRow
+            <AcceptanceCheckRow
               canReview={canReview}
               check={check}
               expanded={expanded.has(check.id)}
@@ -1833,7 +1841,7 @@ const CheckList = memo<CheckListProps>(
     }
 
     return (
-      <Flexbox className={cx(styles.groupCard, styles.groupedCard)}>
+      <Flexbox className={styles.groupCard}>
         {groups.map(({ checks: groupChecks_, key, label, rows }, groupIndex) => {
           const passed = groupChecks_.filter((check) => check.state === 'passed').length;
           const collapsed = collapsedGroups.has(key);
@@ -2054,7 +2062,7 @@ const CheckList = memo<CheckListProps>(
               )}
               {!collapsed &&
                 rows.map((check) => (
-                  <CheckRow
+                  <AcceptanceCheckRow
                     canReview={canReview}
                     check={check}
                     expanded={expanded.has(check.id)}

@@ -2,38 +2,19 @@ import { MAX_UPLOAD_FILE_SIZE, UPLOAD_FILE_SIZE_LIMIT_ERROR_MESSAGE } from '@lob
 import { parseDataUri } from '@lobechat/model-runtime/utils/uriParser';
 import { uuid } from '@lobechat/utils';
 import dayjs from 'dayjs';
-import { sha256 } from 'js-sha256';
 
 import { fileEnv } from '@/envs/file';
 import { lambdaClient } from '@/libs/trpc/client';
 import type { FileMetadata, UploadBase64ToS3Result } from '@/types/files';
 import type { FileUploadState, FileUploadStatus } from '@/types/files/upload';
 
+import { hashFile } from './hashFile';
+
 export const UPLOAD_NETWORK_ERROR = 'NetWorkError';
 
 const MAX_MULTIPART_PARTS = 10_000;
-const HASH_BUFFER_SIZE = 4 * 1024 * 1024;
 const MULTIPART_PART_SIZE = 32 * 1024 * 1024;
 const MULTIPART_UPLOAD_THRESHOLD = 64 * 1024 * 1024;
-
-export const hashFile = async (file: File, signal?: AbortSignal): Promise<string> => {
-  const hasher = sha256.create();
-  const reader = file.stream().getReader({ mode: 'byob' });
-  let buffer = new ArrayBuffer(HASH_BUFFER_SIZE);
-
-  try {
-    while (true) {
-      if (signal?.aborted) throw signal.reason ?? new Error('Upload cancelled by user');
-
-      const { done, value } = await reader.read(new Uint8Array(buffer));
-      if (done) return hasher.hex();
-      hasher.update(value);
-      buffer = value.buffer as ArrayBuffer;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-};
 
 /**
  * Generate file storage path metadata for S3-compatible storage
@@ -78,6 +59,14 @@ interface UploadFileToS3Options {
 }
 
 class UploadService {
+  releaseUpload = async (pathname: string) => {
+    try {
+      await lambdaClient.upload.abortS3Upload.mutate({ pathname });
+    } catch (error) {
+      console.error('Failed to clean S3 upload:', error);
+    }
+  };
+
   /**
    * uniform upload method for both server and client
    */
@@ -137,9 +126,10 @@ class UploadService {
     // Create file object
     const file = new File([blob], fileName, { type: mimeType });
 
+    const hash = await hashFile(file, options.abortController?.signal);
+
     // Use unified upload method
     const { data: metadata } = await this.uploadFileToS3(file, options);
-    const hash = await hashFile(file, options.abortController?.signal);
 
     return {
       fileType: mimeType,
@@ -200,6 +190,7 @@ class UploadService {
         );
       }
     } catch (error) {
+      await this.releaseUpload(uploadPathname);
       if (abortController?.signal.aborted) {
         onProgress?.('cancelled', { progress: 0, restTime: 0, speed: 0 });
       }
@@ -270,14 +261,16 @@ class UploadService {
     signal: AbortSignal | undefined,
     onProgress: (loaded: number) => void,
   ): Promise<void> => {
-    const partSize = Math.max(MULTIPART_PART_SIZE, Math.ceil(file.size / MAX_MULTIPART_PARTS));
-    const partCount = Math.ceil(file.size / partSize);
     const parts: Array<{ etag: string; partNumber: number }> = [];
-    const { uploadId } = await lambdaClient.upload.createS3MultipartUpload.mutate({
+    const upload = await lambdaClient.upload.createS3MultipartUpload.mutate({
       contentType: file.type || undefined,
       pathname,
       size: file.size,
     });
+    const partSize =
+      upload.partSize ?? Math.max(MULTIPART_PART_SIZE, Math.ceil(file.size / MAX_MULTIPART_PARTS));
+    const partCount = Math.ceil(file.size / partSize);
+    const { uploadId } = upload;
 
     try {
       for (let partNumber = 1; partNumber <= partCount; partNumber++) {

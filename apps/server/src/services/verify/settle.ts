@@ -100,7 +100,7 @@ export const driveTaskFromVerify = async (
 
     if (run.status === 'passed') {
       // Verify passing completes the task and cascades (checkpoint / sibling
-      // rollup / downstream unlock). A Goal Graph Work Task is an ordinary task
+      // rollup / downstream unlock). A Goal Graph Task is an ordinary task
       // here — the coordinator reads its completed status on the next tick and
       // synthesizes the finding from it.
       if (task.automationMode) {
@@ -126,17 +126,30 @@ export const driveTaskFromVerify = async (
 
       // `Delivery did not pass verification.` is a contract string, not just
       // copy: the Goal coordinator matches on it to decide whether a paused
-      // Work Task should start another attempt or open a decision gate.
+      // Goal Task should start another attempt or open a decision gate.
       const pauseSummary = isErrored
         ? 'Verification could not run (internal error); the delivery was not evaluated.'
         : 'Delivery did not pass verification.';
-      // Verification outcomes belong to the task itself. Do not create an inbox
-      // brief here: a verifier rejection/error is not a separate user todo.
-      await taskModel.updateStatus(taskOperation.taskId, 'paused', { error: pauseSummary });
-      log(
-        isErrored ? 'verify errored → task %s paused' : 'verify failed → task %s paused',
-        taskOperation.taskId,
-      );
+      if (task.automationMode) {
+        // Mirror of the pass branch: verify judges THIS tick, not the lifetime
+        // schedule. Pausing here would permanently disarm the cron (the
+        // schedule query never picks `paused` tasks up again), so a recurring
+        // task keeps its schedule and the verdict stays on the run.
+        log(
+          isErrored
+            ? 'verify errored → recurring task %s remains scheduled'
+            : 'verify failed → recurring task %s remains scheduled',
+          taskOperation.taskId,
+        );
+      } else {
+        // Verification outcomes belong to the task itself. Do not create an inbox
+        // brief here: a verifier rejection/error is not a separate user todo.
+        await taskModel.updateStatus(taskOperation.taskId, 'paused', { error: pauseSummary });
+        log(
+          isErrored ? 'verify errored → task %s paused' : 'verify failed → task %s paused',
+          taskOperation.taskId,
+        );
+      }
     }
 
     // Deferred creator callback: verify-bound runs defer
@@ -167,13 +180,13 @@ export const driveTaskFromVerify = async (
       );
     }
 
-    // A Goal Work Task settling is the event the coordinator waits on: it
+    // A Goal Task settling is the event the coordinator waits on: it
     // decides whether to synthesize a finding, start another attempt, or open a
     // decision gate. Queue the advance so the goal keeps moving on its own —
     // this is the server-side driver for long-horizon goals, and without it a
     // goal only progresses while some client keeps ticking it.
     try {
-      const goal = await new GoalModel(db, userId, workspaceId).findByWorkTask(
+      const goal = await new GoalModel(db, userId, workspaceId).findByGraphTask(
         taskOperation.taskId,
       );
       if (goal) {

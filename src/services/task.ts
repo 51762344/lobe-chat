@@ -16,6 +16,8 @@ class TaskService {
   getDetail = async (id: string) => lambdaClient.task.detail.query({ id });
 
   list = async (params: {
+    /** Keyset cursor: rows strictly after this `(orderBy timestamp, seq)` position. */
+    after?: { at: Date | string; seq: number };
     assigneeAgentId?: string;
     automated?: boolean;
     orderBy?: 'createdAt' | 'updatedAt';
@@ -147,6 +149,9 @@ class TaskService {
 
   updateStatus = async (id: string, status: TaskStatus, error?: string) =>
     lambdaClient.task.updateStatus.mutate({ error, id, status });
+
+  updateStatusCascade = async (id: string, status: 'canceled' | 'completed') =>
+    lambdaClient.task.updateStatusCascade.mutate({ id, status });
 
   run = async (id: string, params?: { continueTopicId?: string; prompt?: string }) =>
     lambdaClient.task.run.mutate({ id, ...params });

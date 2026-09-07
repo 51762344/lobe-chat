@@ -406,6 +406,96 @@ describe('TaskModel', () => {
       expect(await order({ orderBy: 'updatedAt' })).toEqual([older.id, newer.id]);
     });
 
+    // The Tasks page assembles its full list from consecutive offset pages.
+    // Rows that share a timestamp (bulk imports, agent-created batches) need a
+    // deterministic tiebreak, or a page boundary can repeat one row and skip
+    // another between requests.
+    it('should page stably through rows that share a timestamp', async () => {
+      const model = new TaskModel(serverDB, userId);
+      const created = [];
+      for (let i = 0; i < 5; i += 1) {
+        created.push(await model.create({ instruction: `Batch task ${i}` }));
+      }
+      const ids = created.map((t) => t.id);
+      await serverDB.execute(
+        sql`update tasks set created_at = '2026-03-01T00:00:00Z', updated_at = '2026-03-01T00:00:00Z' where id in ${ids}`,
+      );
+
+      const page = async (offset: number, orderBy?: 'createdAt' | 'updatedAt') =>
+        (await model.list({ limit: 2, offset, orderBy })).tasks.map((t) => t.id);
+
+      for (const orderBy of ['createdAt', 'updatedAt'] as const) {
+        const paged = [
+          ...(await page(0, orderBy)),
+          ...(await page(2, orderBy)),
+          ...(await page(4, orderBy)),
+        ];
+        expect(paged).toHaveLength(5);
+        expect(new Set(paged).size).toBe(5);
+        // Newest sequence first, so the tiebreak agrees with the creation order.
+        expect(paged).toEqual([...ids].reverse());
+      }
+    });
+
+    // The Tasks page walks the list with a keyset cursor (`after`) rather than
+    // offsets: a row deleted between two page reads must not shift the next
+    // page onto a row the client already holds, dropping the last live one.
+    it('should continue after a cursor without skipping rows deleted mid-walk', async () => {
+      const model = new TaskModel(serverDB, userId);
+      const created = [];
+      for (let i = 0; i < 5; i += 1) {
+        created.push(await model.create({ instruction: `Cursor task ${i}` }));
+      }
+      const ids = created.map((t) => t.id);
+      await serverDB.execute(
+        sql`update tasks set created_at = '2026-03-01T00:00:00Z' where id in ${ids}`,
+      );
+
+      const page1 = (await model.list({ limit: 2 })).tasks;
+      expect(page1.map((t) => t.id)).toEqual([ids[4], ids[3]]);
+
+      // A row from page one disappears before page two is read.
+      await model.delete(ids[4]);
+
+      const cursor = { at: page1[1].createdAt, seq: page1[1].seq };
+      const page2 = (await model.list({ after: cursor, limit: 2 })).tasks;
+      expect(page2.map((t) => t.id)).toEqual([ids[2], ids[1]]);
+      const page3 = (
+        await model.list({ after: { at: page2[1].createdAt, seq: page2[1].seq }, limit: 2 })
+      ).tasks;
+      expect(page3.map((t) => t.id)).toEqual([ids[0]]);
+
+      // An offset walk would have re-read ids[2] at offset 2 and never reached ids[0].
+      expect((await model.list({ limit: 2, offset: 2 })).tasks.map((t) => t.id)).toEqual([
+        ids[1],
+        ids[0],
+      ]);
+    });
+
+    it('should order a cursor by the requested timestamp column', async () => {
+      const model = new TaskModel(serverDB, userId);
+      const a = await model.create({ instruction: 'A' });
+      const b = await model.create({ instruction: 'B' });
+      const c = await model.create({ instruction: 'C' });
+      const stamp = async (id: string, iso: string) => {
+        await serverDB.execute(sql`update tasks set updated_at = ${iso} where id = ${id}`);
+      };
+      await stamp(a.id, '2026-06-01T00:00:00Z');
+      await stamp(b.id, '2026-01-01T00:00:00Z');
+      await stamp(c.id, '2026-03-01T00:00:00Z');
+
+      const [first] = (await model.list({ limit: 1, orderBy: 'updatedAt' })).tasks;
+      expect(first.id).toBe(a.id);
+      const rest = (
+        await model.list({
+          after: { at: first.updatedAt, seq: first.seq },
+          limit: 10,
+          orderBy: 'updatedAt',
+        })
+      ).tasks;
+      expect(rest.map((t) => t.id)).toEqual([c.id, b.id]);
+    });
+
     it('should split automated tasks from manual ones', async () => {
       const model = new TaskModel(serverDB, userId);
       const cron = await model.create({
@@ -1781,6 +1871,95 @@ describe('TaskModel', () => {
 
       expect((await model1.findById(a.id))!.status).toBe('completed');
       expect((await model2.findById(other.id))!.status).toBe('backlog');
+    });
+  });
+
+  describe('updateStatusForIds', () => {
+    it('updates exactly the frozen id set in one statement', async () => {
+      const model = new TaskModel(serverDB, userId);
+      const parent = await model.create({ instruction: 'Parent' });
+      const open = await model.create({ instruction: 'Open', parentTaskId: parent.id });
+      const failed = await model.create({ instruction: 'Failed', parentTaskId: parent.id });
+      await model.updateStatus(failed.id, 'failed', { error: 'Needs attention' });
+
+      const updated = await model.updateStatusForIds([parent.id, open.id], 'completed', {
+        completedAt: new Date(),
+      });
+
+      expect(updated.map(({ id }) => id).sort()).toEqual([open.id, parent.id].sort());
+      expect((await model.findById(parent.id))!.status).toBe('completed');
+      expect((await model.findById(open.id))!.status).toBe('completed');
+      expect(await model.findById(failed.id)).toMatchObject({
+        error: 'Needs attention',
+        status: 'failed',
+      });
+    });
+
+    it('does not touch an open subtask outside the frozen id set', async () => {
+      const model = new TaskModel(serverDB, userId);
+      const parent = await model.create({ instruction: 'Parent' });
+      const snapshotted = await model.create({
+        instruction: 'Snapshotted',
+        parentTaskId: parent.id,
+      });
+      // Simulates a subtask created (or started) after the caller's snapshot:
+      // still unfinished, but absent from the frozen id set.
+      const late = await model.create({ instruction: 'Late', parentTaskId: parent.id });
+      await model.updateStatus(late.id, 'running');
+
+      await model.updateStatusForIds([parent.id, snapshotted.id], 'canceled');
+
+      expect((await model.findById(parent.id))!.status).toBe('canceled');
+      expect((await model.findById(snapshotted.id))!.status).toBe('canceled');
+      expect((await model.findById(late.id))!.status).toBe('running');
+    });
+
+    it('returns an empty list for an empty id set', async () => {
+      const model = new TaskModel(serverDB, userId);
+      await expect(model.updateStatusForIds([], 'completed')).resolves.toEqual([]);
+    });
+  });
+
+  describe('getUnlockedTasksForMany', () => {
+    it('discovers dependents unlocked by any of the completed tasks in one pass', async () => {
+      const model = new TaskModel(serverDB, userId);
+      const a = await model.create({ instruction: 'A' });
+      const b = await model.create({ instruction: 'B' });
+      const unlockedByA = await model.create({ instruction: 'Unlocked by A' });
+      const unlockedByBoth = await model.create({ instruction: 'Unlocked by A and B' });
+      const stillBlocked = await model.create({ instruction: 'Still blocked' });
+      const blocker = await model.create({ instruction: 'Blocker' });
+
+      await model.addDependency(unlockedByA.id, a.id);
+      await model.addDependency(unlockedByBoth.id, a.id);
+      await model.addDependency(unlockedByBoth.id, b.id);
+      await model.addDependency(stillBlocked.id, a.id);
+      await model.addDependency(stillBlocked.id, blocker.id);
+
+      await model.updateStatus(a.id, 'completed');
+      await model.updateStatus(b.id, 'completed');
+
+      const unlocked = await model.getUnlockedTasksForMany([a.id, b.id]);
+
+      expect(unlocked.map(({ id }) => id).sort()).toEqual(
+        [unlockedByA.id, unlockedByBoth.id].sort(),
+      );
+    });
+
+    it('skips dependents that are no longer in backlog', async () => {
+      const model = new TaskModel(serverDB, userId);
+      const done = await model.create({ instruction: 'Done' });
+      const started = await model.create({ instruction: 'Already started' });
+      await model.addDependency(started.id, done.id);
+      await model.updateStatus(done.id, 'completed');
+      await model.updateStatus(started.id, 'running');
+
+      await expect(model.getUnlockedTasksForMany([done.id])).resolves.toEqual([]);
+    });
+
+    it('returns an empty list for an empty id set', async () => {
+      const model = new TaskModel(serverDB, userId);
+      await expect(model.getUnlockedTasksForMany([])).resolves.toEqual([]);
     });
   });
 

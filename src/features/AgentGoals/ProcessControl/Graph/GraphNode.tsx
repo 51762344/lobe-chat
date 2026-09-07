@@ -302,7 +302,7 @@ const GraphNodeView = memo<NodeProps>(({ data }) => {
                 <span className={styles.human}>@</span>
               </Tooltip>
             )}
-            {/* Top-right corner: this Work carries its own verifier. Icon only —
+            {/* Top-right corner: this Task carries its own verifier. Icon only —
                 the word added nothing the hover hint doesn't say better. */}
             {isTask && node.taskId && (
               <Tooltip title={t('goalProcess.node.verifierTooltip')}>
@@ -332,13 +332,13 @@ const GraphNodeView = memo<NodeProps>(({ data }) => {
                 {attempts}
               </span>
             </Tooltip>
-            {view.artifactCount > 0 && (
+            {view.artifacts.length > 0 && (
               <Tooltip
-                title={t('goalProcess.node.artifactsTooltip', { count: view.artifactCount })}
+                title={t('goalProcess.node.artifactsTooltip', { count: view.artifacts.length })}
               >
                 <span className={styles.metric}>
                   <Icon icon={FileBox} size={13} />
-                  {view.artifactCount}
+                  {view.artifacts.length}
                 </span>
               </Tooltip>
             )}

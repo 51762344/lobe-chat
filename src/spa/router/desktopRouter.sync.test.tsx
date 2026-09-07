@@ -10,6 +10,7 @@ import BrandTextLoading from '@/components/Loading/BrandTextLoading';
 import AppsSkeleton from '@/components/Skeleton/Apps';
 import ConversationLayoutSkeleton from '@/components/Skeleton/Conversation/Layout';
 import ConversationSegmentSkeleton from '@/components/Skeleton/Conversation/Segment';
+import DelayedFallback from '@/components/Skeleton/Delayed';
 import GoalSkeleton from '@/components/Skeleton/Goal';
 import GoalDetailSkeleton from '@/components/Skeleton/GoalDetail';
 import MemorySkeleton from '@/components/Skeleton/Memory';
@@ -32,7 +33,7 @@ import {
   createMainAreaChildren as createElectronMainAreaChildren,
   desktopRoutes as electronDesktopRoutes,
 } from './desktopRouter.config.desktop';
-import { createMainAreaRouteFactory } from './desktopRouter.shared';
+import { createMainAreaRouteFactory, ResourceCategorySkeleton } from './desktopRouter.shared';
 
 type MainAreaFactory = () => RouteObject[];
 
@@ -108,6 +109,7 @@ describe('desktop router shared definition', () => {
         '/agent/agent-1/channel',
         '/agent/agent-1/channel/slack',
         '/agent/agent-1/statistics',
+        '/agent/agent-1/share',
         '/group/group-1/profile',
       ]) {
         const matches = matchRoutes(createMainAreaRoutes(createMainAreaChildren), pathname);
@@ -185,7 +187,7 @@ describe('desktop router shared definition', () => {
   });
 
   it.each(mainAreaVariants)(
-    '%s exposes projects as task and goal containers only',
+    '%s exposes project task, goal, and acceptance workspaces',
     (_, factory) => {
       const projectRoute = factory().find((route) => route.path === 'project/:projectId');
       const projectIndexRoute = projectRoute?.children?.find((route) => route.index);
@@ -193,7 +195,7 @@ describe('desktop router shared definition', () => {
         ?.map((route) => route.path)
         .filter((routePath): routePath is string => Boolean(routePath));
 
-      expect(projectPaths).toEqual(['tasks', 'goals']);
+      expect(projectPaths).toEqual(['tasks', 'goals', 'acceptance']);
       expect(
         (projectIndexRoute?.element as ReactElement<{ to: string }> | undefined)?.props.to,
       ).toBe('tasks');
@@ -280,6 +282,11 @@ describe('desktop router shared definition', () => {
     // `/share/*` moved to the standalone Share app (apps/share).
     expect(webPaths).not.toContain('/share/t');
     expect(webPaths).not.toContain('/share/page');
+    // …and the agent-share visitor surface lives at `/a/:slugOrId`, a sibling
+    // of the main layout on every platform (Web, Electron, and the mobile
+    // router — see mobileRouter.test.tsx).
+    expect(webPaths).toContain('/a/:slugOrId');
+    expect(electronPaths).toContain('/a/:slugOrId');
     expect(webPaths).not.toContain('/verify');
     expect(webPaths).toContain('/acceptance');
     expect(webPaths).toContain('/onboarding');
@@ -307,12 +314,21 @@ describe('desktop router shared definition', () => {
   // Suspense, which always beats an outlet-level boundary — so without the
   // rewrite the brand wordmark reappears inside the container for 1–2s on a
   // cold deep link, right after the boot shell hands over.
+  // Page-level fallbacks sit behind the 200ms gate, so the skeleton under test
+  // is the gate's child rather than the fallback element itself.
+  const fallbackType = (fallback?: ReactElement): unknown => {
+    if (!fallback) return undefined;
+    if (fallback.type !== DelayedFallback) return fallback.type;
+
+    return (fallback.props as { children: ReactElement }).children.type;
+  };
+
   const collectFallbacks = (list: RouteObject[]): unknown[] => {
     const fallbacks: unknown[] = [];
     const walk = (routes: RouteObject[]) => {
       for (const route of routes) {
         const element = route.element as ReactElement<{ fallback?: ReactElement }> | undefined;
-        if (element?.props?.fallback) fallbacks.push(element.props.fallback.type);
+        if (element?.props?.fallback) fallbacks.push(fallbackType(element.props.fallback));
         if (route.children) walk(route.children);
       }
     };
@@ -353,10 +369,11 @@ describe('desktop router shared definition', () => {
       ] as const) {
         const matches = matchRoutes(createRuntimeRoutes(pathname), pathname);
         const fallbackTypes = matches
-          ?.map(
-            ({ route }) =>
+          ?.map(({ route }) =>
+            fallbackType(
               (route.element as ReactElement<{ fallback?: ReactElement }> | undefined)?.props
-                .fallback?.type,
+                .fallback,
+            ),
           )
           .filter(Boolean);
 
@@ -384,6 +401,9 @@ describe('desktop router shared definition', () => {
       ['/apps', AppsSkeleton],
       ['/memory', MemorySkeleton],
       ['/resource', ResourceHomeSkeleton],
+      ['/resource/files', ResourceCategorySkeleton],
+      ['/resource/images', ResourceCategorySkeleton],
+      ['/resource/works', ResourceCategorySkeleton],
     ] as const) {
       const matches = matchRoutes(getRoutes(pathname), pathname);
       expect(
@@ -488,6 +508,30 @@ describe('desktop router shared definition', () => {
         sub: 'client-1',
         workspaceSlug: 'acme',
       });
+    },
+  );
+
+  it.each(mainAreaVariants)(
+    '%s keeps serving the creator agent surface on /agent/:aid',
+    (_, factory) => {
+      const matches = matchRoutes(createMainAreaRoutes(factory), '/agent/agt_1');
+
+      expect(matches?.some((match) => match.route.path === ':aid')).toBe(true);
+      expect(matches?.at(-1)?.params).toMatchObject({ aid: 'agt_1' });
+    },
+  );
+
+  it.each([
+    ['Web', webDesktopRoutes],
+    ['Electron', electronDesktopRoutes],
+  ])(
+    '%s serves the agent-share visitor page on /a/:slugOrId outside the main layout',
+    (_, routes) => {
+      const matches = matchRoutes(routes, '/a/my-bot');
+
+      expect(matches).toHaveLength(1);
+      expect(matches?.[0]?.route.path).toBe('/a/:slugOrId');
+      expect(matches?.[0]?.params).toMatchObject({ slugOrId: 'my-bot' });
     },
   );
 

@@ -1,16 +1,23 @@
 import type {
   FrontierCandidate,
   GoalBudgetState,
+  GoalMetricCriteriaState,
   GoalTickBranch,
   GoalTickOutcome,
 } from '@lobechat/agent-tracing';
 import { GOAL_ACCEPTANCE_TASK_TITLE } from '@lobechat/const/goal';
-import type { GoalGraphNode, GoalGraphSnapshot, TaskItem } from '@lobechat/types';
+import type {
+  GoalGraphNode,
+  GoalGraphSnapshot,
+  GoalMetricComparison,
+  TaskItem,
+} from '@lobechat/types';
+import { toMetricScale } from '@lobechat/types';
 
 export { GOAL_ACCEPTANCE_TASK_TITLE } from '@lobechat/const/goal';
 
 /** Reason strings the recovery paths key off, written by the settle path. */
-export const LEASE_EXPIRED_ERROR = 'Goal Work operation lease expired.';
+export const LEASE_EXPIRED_ERROR = 'Goal Task operation lease expired.';
 export const VERIFICATION_FAILED_ERROR = 'Delivery did not pass verification.';
 
 export const TERMINAL_NODE_STATUSES = new Set(['resolved', 'rejected', 'retired']);
@@ -25,7 +32,7 @@ export interface FrontierSelection {
 }
 
 /**
- * Rank the work nodes that could run right now.
+ * Rank the task nodes that could run right now.
  *
  * Split out of the decision so the caller can resolve the chosen node's task
  * before deciding, and exported so a trace keeps the whole ranking rather than
@@ -73,7 +80,7 @@ export const selectFrontier = (graph: GoalGraphSnapshot): FrontierSelection => {
  * the budget has to be read before deciding.
  *
  * Every other task status resolves to a branch that costs nothing, so a goal
- * that is merely waiting on a running Work does not pay for a budget query on
+ * that is merely waiting on a running Task does not pay for a budget query on
  * every sweep.
  */
 export const needsBudget = (task?: TaskItem | null): boolean => {
@@ -106,6 +113,55 @@ export const frontierNeedsBudget = (
     return needsBudget(tasksById.get(node.taskId) ?? null);
   });
 
+/**
+ * Opening of the message the gate parks a goal with, and therefore of the
+ * reason recorded on its status trail. Shared so the recovery path that reads
+ * historical parks back cannot drift from the wording that wrote them.
+ */
+export const MEASURED_ACCEPTANCE_PAUSE_REASON = 'Measured acceptance not met';
+
+/** Evaluate one numeric clause. Kept beside the gate that consumes it. */
+export const compareMetric = (
+  rawValue: number,
+  op: GoalMetricComparison,
+  rawTarget: number,
+): boolean => {
+  // Both operands are read at the storage scale: the observation was already
+  // rounded on its way into `numeric(20, 6)`, so comparing it against a
+  // full-precision target would judge two different numbers — `eq 0.1234567`
+  // could never hold, and `gte` / `lte` could flip at the rounding boundary.
+  const value = toMetricScale(rawValue);
+  const target = toMetricScale(rawTarget);
+  switch (op) {
+    case 'eq': {
+      return value === target;
+    }
+    case 'gt': {
+      return value > target;
+    }
+    case 'gte': {
+      return value >= target;
+    }
+    case 'lt': {
+      return value < target;
+    }
+    case 'lte': {
+      return value <= target;
+    }
+  }
+};
+
+/**
+ * Whether this tick could read numeric acceptance criteria: the goal declares
+ * some, and every Task node is terminal so the coordinator is in its terminal
+ * phase. Keeps the extra reads off every dispatch tick.
+ */
+export const needsMetricCriteria = (graph: GoalGraphSnapshot): boolean => {
+  if (!graph.goal.config?.acceptance?.metrics?.length) return false;
+  const taskNodes = graph.nodes.filter((node) => node.kind === 'task');
+  return taskNodes.length > 0 && taskNodes.every((node) => TERMINAL_NODE_STATUSES.has(node.status));
+};
+
 export interface GoalMoveInput {
   /** Required only when {@link needsBudget} says the branch could dispatch or recover. */
   budget?: GoalBudgetState;
@@ -113,6 +169,13 @@ export interface GoalMoveInput {
   concurrency: number;
   frontier: FrontierSelection;
   graph: GoalGraphSnapshot;
+  /**
+   * Required only when {@link needsMetricCriteria} holds — the terminal phase
+   * of a goal that declares numeric acceptance clauses. Evaluating them is a
+   * database read, so it happens in `tick` and travels in, the same way the
+   * budget does.
+   */
+  metricCriteria?: GoalMetricCriteriaState;
   /**
    * The responsible Task of every candidate that has one, keyed by task id.
    * A candidate whose task id is absent from the map has lost its row.
@@ -161,6 +224,7 @@ export const decideNextMove = ({
   concurrency,
   frontier,
   graph,
+  metricCriteria,
   tasksById,
 }: GoalMoveInput): GoalMove => {
   const { candidates, chosen } = frontier;
@@ -239,7 +303,7 @@ export const decideNextMove = ({
     return move;
   }
 
-  if (!chosen) return decideWithoutFrontier(graph, candidates);
+  if (!chosen) return decideWithoutFrontier(graph, candidates, metricCriteria);
 
   // Everything eligible is either running, parked on a person, or waiting for a
   // slot. Report which, so the row does not read as stalled when it is simply
@@ -265,7 +329,7 @@ export const decideNextMove = ({
     };
   }
 
-  return decideWithoutFrontier(graph, candidates);
+  return decideWithoutFrontier(graph, candidates, metricCriteria);
 };
 
 /** What one candidate wants, or why it cannot be acted on right now. */
@@ -313,49 +377,67 @@ const decideForCandidate = ({
 const decideWithoutFrontier = (
   graph: GoalGraphSnapshot,
   candidates: FrontierCandidate[],
+  metricCriteria?: GoalMetricCriteriaState,
 ): GoalMove => {
   const base = { candidates };
   const taskNodes = graph.nodes.filter((node) => node.kind === 'task');
 
-  // A goal with no work at all has not been planned yet — decompose it into
+  // A goal with no tasks at all has not been planned yet — decompose it into
   // explorable directions before anything runs, instead of parking it.
   if (taskNodes.length === 0) {
     return {
       ...base,
       branch: 'plan_decomposition',
-      message: 'Goal has no work yet; plan its exploration structure first',
+      message: 'Goal has no tasks yet; plan its exploration structure first',
       outcome: 'advanced',
     };
   }
 
-  const allWorkTerminal = taskNodes.every((node) => TERMINAL_NODE_STATUSES.has(node.status));
+  const allTasksTerminal = taskNodes.every((node) => TERMINAL_NODE_STATUSES.has(node.status));
 
-  if (!allWorkTerminal) {
-    // Nothing here moves without a person: every remaining Work is blocked and
+  if (!allTasksTerminal) {
+    // Nothing here moves without a person: every remaining Task is blocked and
     // nothing is running to unblock it.
     return {
       ...base,
       branch: 'no_frontier',
-      message: 'No work node is ready; resolve its dependencies first',
+      message: 'No task node is ready; resolve its dependencies first',
       outcome: 'no_progress',
     };
   }
 
-  const acceptanceWork = taskNodes.find((node) => node.title === GOAL_ACCEPTANCE_TASK_TITLE);
+  // Measured clauses gate the delivery contract, and are checked before it:
+  // an unmet number is not something a verifier can talk its way past, so
+  // creating (or re-running) the acceptance Task against it would only spend
+  // tokens to restate the gap. `no_progress` leaves the goal running — the
+  // next observation is what moves it, not another attempt.
+  if (metricCriteria && !metricCriteria.allMet) {
+    const unmet = metricCriteria.criteria.filter((criterion) => !criterion.met);
+    return {
+      ...base,
+      branch: 'measured_acceptance',
+      message: `${MEASURED_ACCEPTANCE_PAUSE_REASON}: ${unmet
+        .map((c) => `${c.key} ${c.op} ${c.target} (${c.value ?? 'no observation'})`)
+        .join(', ')}`,
+      outcome: 'no_progress',
+    };
+  }
 
-  if (graph.goal.requirement && !acceptanceWork) {
+  const acceptanceTask = taskNodes.find((node) => node.title === GOAL_ACCEPTANCE_TASK_TITLE);
+
+  if (graph.goal.requirement && !acceptanceTask) {
     return {
       ...base,
       branch: 'terminal_acceptance',
-      message: 'Every Work finished; the Goal-level acceptance contract is next',
+      message: 'Every Task finished; the Goal-level acceptance contract is next',
       outcome: 'advanced',
     };
   }
-  if (graph.goal.requirement && acceptanceWork?.status !== 'resolved') {
+  if (graph.goal.requirement && acceptanceTask?.status !== 'resolved') {
     return {
       ...base,
       branch: 'terminal_acceptance',
-      focusNodeId: acceptanceWork?.id,
+      focusNodeId: acceptanceTask?.id,
       message: 'Goal-level acceptance did not pass',
       outcome: 'no_progress',
     };
@@ -397,7 +479,7 @@ const decideForTask = (
       return {
         ...base,
         branch: 'budget_exhausted',
-        message: `Deadline passed (${graph.goal.config?.schedule?.deadline ?? 'unknown'}); no new Work will be dispatched`,
+        message: `Deadline passed (${graph.goal.config?.schedule?.deadline ?? 'unknown'}); no new Task will be dispatched`,
         outcome: 'no_progress',
       };
     }
@@ -427,7 +509,7 @@ const decideForTask = (
     };
   }
 
-  // Parked on a person, and holding no slot. The goal has other work.
+  // Parked on a person, and holding no slot. The goal has other Tasks.
   if (task.status === 'paused') return 'parked';
 
   // Callers filter these out before they get here; kept so the classification
@@ -438,7 +520,7 @@ const decideForTask = (
     return {
       ...base,
       branch: 'budget_exhausted',
-      message: `Deadline passed (${graph.goal.config?.schedule?.deadline ?? 'unknown'}); no new Work will be dispatched`,
+      message: `Deadline passed (${graph.goal.config?.schedule?.deadline ?? 'unknown'}); no new Task will be dispatched`,
       outcome: 'no_progress',
     };
   }
@@ -447,7 +529,7 @@ const decideForTask = (
     return {
       ...base,
       branch: 'budget_exhausted',
-      message: `Deadline passed (${graph.goal.config?.schedule?.deadline ?? 'unknown'}); no new Work will be dispatched`,
+      message: `Deadline passed (${graph.goal.config?.schedule?.deadline ?? 'unknown'}); no new Task will be dispatched`,
       outcome: 'no_progress',
     };
   }
