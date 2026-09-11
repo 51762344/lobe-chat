@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BotMessageRouter } from '../BotMessageRouter';
 
@@ -23,10 +23,12 @@ vi.mock('@/database/core/db-adaptor', () => ({
 vi.mock('@/database/models/agentBotProvider', () => {
   // Constructor returns the same set of instance-method mocks so tests
   // can assert / configure without grabbing a per-instance reference.
-  const ctor = vi.fn().mockImplementation(() => ({
-    findById: mockProviderFindById,
-    update: mockProviderUpdate,
-  }));
+  const ctor = vi.fn().mockImplementation(function () {
+    return {
+      findById: mockProviderFindById,
+      update: mockProviderUpdate,
+    };
+  });
   // Preserve the static method other tests rely on (load path).
   (
     ctor as unknown as { findEnabledByPlatform: typeof mockFindEnabledByPlatform }
@@ -86,26 +88,30 @@ const mockStateSetIfNotExists = vi.hoisted(() => vi.fn().mockResolvedValue(true)
 
 vi.mock('chat', () => ({
   BaseFormatConverter: class {},
-  Chat: vi.fn().mockImplementation(() => ({
-    getState: vi.fn(() => ({
-      appendToList: mockAppendToList,
-      getList: mockGetList,
-      setIfNotExists: mockStateSetIfNotExists,
-    })),
-    initialize: mockInitialize,
-    onNewMention: mockOnNewMention,
-    onNewMessage: mockOnNewMessage,
-    onSlashCommand: mockOnSlashCommand,
-    onSubscribedMessage: mockOnSubscribedMessage,
-    webhooks: mockChatWebhooks,
-  })),
+  Chat: vi.fn().mockImplementation(function () {
+    return {
+      getState: vi.fn(() => ({
+        appendToList: mockAppendToList,
+        getList: mockGetList,
+        setIfNotExists: mockStateSetIfNotExists,
+      })),
+      initialize: mockInitialize,
+      onNewMention: mockOnNewMention,
+      onNewMessage: mockOnNewMessage,
+      onSlashCommand: mockOnSlashCommand,
+      onSubscribedMessage: mockOnSubscribedMessage,
+      webhooks: mockChatWebhooks,
+    };
+  }),
   ConsoleLogger: vi.fn(),
 }));
 
 vi.mock('@/server/services/aiAgent', () => ({
-  AiAgentService: vi.fn().mockImplementation(() => ({
-    interruptTask: vi.fn().mockResolvedValue({ success: true }),
-  })),
+  AiAgentService: vi.fn().mockImplementation(function () {
+    return {
+      interruptTask: vi.fn().mockResolvedValue({ success: true }),
+    };
+  }),
 }));
 
 const mockHandleMention = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
@@ -138,35 +144,35 @@ const mockChatWebhooks = vi.hoisted(
     >,
 );
 const mockMergeWithDefaults = vi.hoisted(() =>
-  vi.fn((_: unknown, settings?: Record<string, unknown>) => settings ?? {}),
+  vi.fn(function (_: unknown, settings?: Record<string, unknown>) {
+    return settings ?? {};
+  }),
 );
 const mockResolveBotProviderConfig = vi.hoisted(() =>
-  vi.fn(
-    (
-      platform: { id: string; schema?: unknown },
-      provider: {
-        applicationId: string;
-        credentials: Record<string, string>;
-        settings?: Record<string, unknown> | null;
-      },
-    ) => {
-      const settings = mockMergeWithDefaults(platform.schema, provider.settings ?? undefined);
-      return {
-        config: {
-          applicationId: provider.applicationId,
-          credentials: provider.credentials,
-          platform: platform.id,
-          settings,
-        },
-        connectionMode: 'webhook' as const,
-        settings,
-      };
+  vi.fn(function (
+    platform: { id: string; schema?: unknown },
+    provider: {
+      applicationId: string;
+      credentials: Record<string, string>;
+      settings?: Record<string, unknown> | null;
     },
-  ),
+  ) {
+    const settings = mockMergeWithDefaults(platform.schema, provider.settings ?? undefined);
+    return {
+      config: {
+        applicationId: provider.applicationId,
+        credentials: provider.credentials,
+        platform: platform.id,
+        settings,
+      },
+      connectionMode: 'webhook' as const,
+      settings,
+    };
+  }),
 );
 
 const mockGetPlatform = vi.hoisted(() =>
-  vi.fn().mockImplementation((platform: string) => {
+  vi.fn().mockImplementation(function (platform: string) {
     if (platform === 'unknown') return undefined;
     return {
       clientFactory: {
@@ -490,10 +496,12 @@ describe('BotMessageRouter', () => {
     mockFindEnabledByPlatform.mockResolvedValue([]);
     mockHandleMention.mockResolvedValue(undefined);
     mockHandleSubscribedMessage.mockResolvedValue(undefined);
-    mockAgentBridgeServiceCtor.mockImplementation(() => ({
-      handleMention: mockHandleMention,
-      handleSubscribedMessage: mockHandleSubscribedMessage,
-    }));
+    mockAgentBridgeServiceCtor.mockImplementation(function () {
+      return {
+        handleMention: mockHandleMention,
+        handleSubscribedMessage: mockHandleSubscribedMessage,
+      };
+    });
     mockOpenThreadForChannelWake.mockResolvedValue(undefined);
     // participant tracking — restore defaults wiped by
     // clearAllMocks. Empty list = fresh single-human thread; individual
@@ -716,12 +724,11 @@ describe('BotMessageRouter', () => {
 
       it('awaits the re-registration before answering, so a serverless host cannot cancel it', async () => {
         let resolveReconcile!: () => void;
-        mockReconcileWebhook.mockImplementationOnce(
-          () =>
-            new Promise<void>((r) => {
-              resolveReconcile = r;
-            }),
-        );
+        mockReconcileWebhook.mockImplementationOnce(function () {
+          return new Promise<void>((r) => {
+            resolveReconcile = r;
+          });
+        });
         mockFindEnabledByPlatform.mockResolvedValue([
           makeProvider({ applicationId: 'tg-bot-123' }),
         ]);
@@ -952,6 +959,68 @@ describe('BotMessageRouter', () => {
       await handler(thread, message);
 
       expect(mockHandleSubscribedMessage).toHaveBeenCalledTimes(1);
+    });
+
+    describe('platform-reported membership (isSoloBotConversation)', () => {
+      const defaultGetPlatform = mockGetPlatform.getMockImplementation()!;
+      afterEach(() => {
+        mockGetPlatform.mockImplementation(defaultGetPlatform);
+      });
+
+      /** Same client as the default factory, plus a membership lookup. */
+      function withMembershipLookup(isSoloBotConversation: ReturnType<typeof vi.fn>) {
+        // Persistent, not `Once`: the router resolves the platform more than
+        // once between registration and the first handled message.
+        mockGetPlatform.mockImplementation(function (platform: string) {
+          const def = defaultGetPlatform(platform);
+          if (!def) return def;
+          const client = def.clientFactory.createClient();
+          return {
+            ...def,
+            clientFactory: {
+              createClient: vi.fn().mockReturnValue({ ...client, isSoloBotConversation }),
+            },
+          };
+        });
+      }
+
+      it('does not look up membership for a DM — the answer cannot change', async () => {
+        // A lapsed cache would otherwise put a platform round-trip in front of
+        // every direct message.
+        const isSoloBotConversation = vi.fn().mockResolvedValue(false);
+        withMembershipLookup(isSoloBotConversation);
+        const handler = await loadSubscribedHandler();
+
+        await handler(makeThread({ isDM: true }), makeMessage({ isMention: false, text: 'hi' }));
+
+        expect(isSoloBotConversation).not.toHaveBeenCalled();
+        expect(mockHandleSubscribedMessage).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not look up membership for an @mention either', async () => {
+        const isSoloBotConversation = vi.fn().mockResolvedValue(false);
+        withMembershipLookup(isSoloBotConversation);
+        const handler = await loadSubscribedHandler();
+
+        await handler(makeThread(), makeMessage({ isMention: true, text: '@bot hi' }));
+
+        expect(isSoloBotConversation).not.toHaveBeenCalled();
+        expect(mockHandleSubscribedMessage).toHaveBeenCalledTimes(1);
+      });
+
+      it('trusts membership over the speaker count for an unmentioned group message', async () => {
+        // Only one human has ever SPOKEN here (the old heuristic would let it
+        // through), but the platform says the chat is not 1:1 with the bot.
+        mockGetList.mockResolvedValue([]);
+        const isSoloBotConversation = vi.fn().mockResolvedValue(false);
+        withMembershipLookup(isSoloBotConversation);
+        const handler = await loadSubscribedHandler();
+
+        await handler(makeThread(), makeMessage({ isMention: false, text: 'just chatting' }));
+
+        expect(isSoloBotConversation).toHaveBeenCalledWith('telegram:chat-1');
+        expect(mockHandleSubscribedMessage).not.toHaveBeenCalled();
+      });
     });
 
     it('should respond when a debounced/skipped earlier message contained the mention', async () => {
